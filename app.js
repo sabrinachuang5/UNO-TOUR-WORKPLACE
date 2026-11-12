@@ -1103,7 +1103,7 @@ function transactionForm(card, tx = {}) {
           tx.currency || "EUR",
           true,
           "select",
-          ["EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "TWD", "其他"]
+          ["EUR", "NOK", "SEK", "DKK", "ISK", "USD"]
         )}
         ${field("原幣金額", "amount", tx.amount, true, "number")}
         ${field("台幣估算金額（TWD）", "twdEstimate", tx.twdEstimate, true, "number")}
