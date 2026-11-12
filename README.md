@@ -19,3 +19,4 @@
 ## 重要資料提醒
 此版本使用瀏覽器 localStorage 儲存資料，不會跨裝置同步。請定期匯出 JSON 備份。
 GitHub Pages 網站是公開網站，請勿在網站程式或頁面放入旅客個資、公司機密、信用卡號、完整付款憑證等敏感資訊。Google Sheets 與 Excel 請使用公司核准的共用連結及權限。
+UNO TOUR Workplace update
