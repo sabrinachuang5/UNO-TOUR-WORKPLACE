@@ -32,10 +32,14 @@ function loadDB() {
     return {
       groups: Array.isArray(saved.groups) ? saved.groups.map(item => ({ ...item, id: item.id || uid(), deadlineDone: item.deadlineDone && typeof item.deadlineDone === "object" ? item.deadlineDone : {} })) : [],
       cards: Array.isArray(saved.cards) ? saved.cards.map(item => ({ ...item, id: item.id || uid() })) : [],
-      remits: Array.isArray(saved.remits) ? saved.remits.map(item => ({ ...item, id: item.id || uid() })) : []
+      remits: Array.isArray(saved.remits) ? saved.remits.map(item => ({ ...item, id: item.id || uid() })) : [],
+      wallets: Array.isArray(saved.wallets) ? saved.wallets.map(item => ({ ...item, id: item.id || uid() })) : [],
+      fxRates: saved.fxRates && typeof saved.fxRates === "object" ? saved.fxRates : { EUR: 37, NOK: 3.5, SEK: 3.3, DKK: 4.9, ISK: 0.27 },
+      fxUpdatedAt: saved.fxUpdatedAt || "",
+      tools: Array.isArray(saved.tools) ? saved.tools.map(item => ({ ...item, id: item.id || uid() })) : []
     };
   } catch {
-    return { groups: [], cards: [], remits: [] };
+    return { groups: [], cards: [], remits: [], wallets: [], fxRates: { EUR: 37, NOK: 3.5, SEK: 3.3, DKK: 4.9, ISK: 0.27 }, fxUpdatedAt: "", tools: [] };
   }
 }
 let db = loadDB();
@@ -62,7 +66,7 @@ function deadlineItems(group) {
 function pageTitle(page) {
   return ({
     dashboard: "工作總覽", groups: "團體總表", deadlines: "Deadline 管理",
-    cards: "虛擬卡記帳", remits: "共同匯款紀錄", backup: "資料備份"
+    cards: "虛擬卡記帳", remits: "共同匯款紀錄", toolbox: "工作工具箱", backup: "資料備份"
   })[page] || "工作總覽";
 }
 
@@ -117,19 +121,27 @@ function render() {
   }
 
   if (view === "cards") {
-    content.innerHTML = `<div class="panel"><div class="row between"><h2>虛擬卡刷卡紀錄</h2><button class="btn" id="addCard">＋ 新增刷卡</button></div>${cardTable()}</div>`;
+    content.innerHTML = `<div class="panel"><div class="row between"><h2>虛擬卡刷卡紀錄</h2><div class="row"><button class="btn light" id="manageWallets">管理虛擬卡額度</button><button class="btn" id="addCard">＋ 新增刷卡</button></div></div>
+      <div class="panel" style="margin:12px 0;padding:14px;background:#f8faf9"><div class="row between"><b>參考匯率（約 NT$）</b><div class="row"><small class="muted">${db.fxUpdatedAt ? `最後更新：${esc(db.fxUpdatedAt)}` : "尚未更新，使用預設值"}</small><button class="btn light" id="refreshRates">更新匯率</button><button class="btn light" id="editRates">設定匯率</button></div></div><div class="grid">${Object.entries(db.fxRates).map(([c,r])=>`<div class="stat"><span>${esc(c)}</span><strong>NT$ ${Number(r).toLocaleString("en-US",{maximumFractionDigits:4})}</strong></div>`).join("")}</div><p class="muted">匯率為外部參考資料估算，非 Google 官方報價或銀行實際扣款；可手動調整。</p></div>
+      <div id="walletSummary">${walletSummary()}</div>
+      <div class="toolbar"><input id="cardSearch" placeholder="搜尋團號／項目／商家／卡片"></div><div id="cardSummary">${cardSummary(db.cards)}</div><div id="cardRows">${cardTable(db.cards)}</div></div>`;
   }
 
   if (view === "remits") {
     content.innerHTML = `<div class="panel"><div class="row between"><h2>共同匯款歷史紀錄</h2><button class="btn" id="addRemit">＋ 新增匯款紀錄</button></div>
-      <p class="muted">記錄不同同事的團一起匯給同一供應商；單純留存紀錄，不追蹤其他同事的工作流程。</p>${remitTable()}</div>`;
+      <p class="muted">依供應商分筆記錄送單日、匯款日、團號、負責同事（TO）、Bank fee 與 Total。</p>
+      <div class="toolbar"><input id="remitSearch" placeholder="搜尋供應商／團號／負責 OP"><select id="remitCurrency"><option value="">全部幣別</option>${[...new Set(db.remits.map(x=>x.currency).filter(Boolean))].map(c=>`<option>${esc(c)}</option>`).join("")}</select></div><div id="remitRows">${remitTable(db.remits)}</div></div>`;
+  }
+
+  if (view === "toolbox") {
+    content.innerHTML = `<div class="panel"><div class="row between"><h2>工作工具箱</h2><button class="btn" id="addTool">＋ 新增捷徑</button></div><p class="muted">放置常用 Google Sheets 或其他工作連結，可自行新增、修改及刪除。</p><div id="toolRows">${toolTable(db.tools)}</div></div>`;
   }
 
   if (view === "backup") {
     content.innerHTML = `<div class="panel"><h2>資料備份</h2>
       <p>資料只存在目前使用的瀏覽器。請定期匯出 JSON，並妥善保存備份檔。</p>
       <div class="row"><button class="btn" id="export">匯出完整備份</button><label class="btn light">匯入備份<input id="import" type="file" accept=".json,application/json" hidden></label></div>
-      <p class="muted">備份包含團體資料、虛擬卡紀錄及共同匯款紀錄；Google Sheets／Excel 正式文件仍以原始連結為準。</p></div>`;
+      <p class="muted">備份包含團體資料、刷卡紀錄、虛擬卡額度、匯率、共同匯款紀錄及工作工具箱捷徑；Google Sheets／Excel 正式文件仍以原始連結為準。</p></div>`;
   }
 }
 
@@ -156,23 +168,55 @@ function deadlineTable(list) {
     </tr>`).join("")}
     </tbody></table></div>`;
 }
-
-function cardTable() {
-  if (!db.cards.length) return '<div class="empty">尚無刷卡紀錄。</div>';
-  return `<div class="table-wrap"><table><thead><tr><th>日期</th><th>團號</th><th>商家</th><th>用途</th><th>原幣金額</th><th>台幣實際扣款</th><th>卡片</th><th>操作</th></tr></thead><tbody>
-    ${db.cards.map(card => `<tr><td>${fmt(card.date)}</td><td>${esc(card.group)}</td><td>${esc(card.merchant)}</td><td>${esc(card.purpose)}</td><td>${esc(card.currency)} ${esc(card.amount)}</td><td>${esc(card.twd)}</td><td>${esc(card.card)}</td>
-      <td><button class="linkbtn" data-edit-card="${esc(card.id)}">編輯</button> <button class="linkbtn danger" data-delete-card="${esc(card.id)}">刪除</button></td></tr>`).join("")}
+function money(value, digits = 2) {
+  return Number(value || 0).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: digits });
+}
+function rateFor(currency) { return Number(db.fxRates?.[currency]) || 0; }
+function estimatedTWD(card) {
+  const rate = rateFor(card.currency || "EUR");
+  return (Number(card.amount) || 0) * rate;
+}
+function walletName(card) { return card.walletId ? (db.wallets.find(w => w.id === card.walletId)?.name || card.card || "未指定") : (card.card || "未指定"); }
+function walletSummary() {
+  if (!db.wallets.length) return `<div class="empty" style="margin:10px 0">尚未設定虛擬卡額度。請先點選「管理虛擬卡額度」新增卡片；舊刷卡紀錄仍會保留。</div>`;
+  const cards = db.wallets.map(wallet => {
+    const used = db.cards.filter(card => card.walletId === wallet.id || (!card.walletId && card.card === wallet.name)).reduce((sum, card) => sum + estimatedTWD(card), 0);
+    const limit = Number(wallet.limit) || 0;
+    const remain = limit - used;
+    const pct = limit > 0 ? Math.min(100, Math.max(0, used / limit * 100)) : 0;
+    return `<div class="stat" style="min-width:220px"><div class="row between"><b>${esc(wallet.name)}</b><small>到期：${fmt(wallet.expiry)}</small></div><span>台幣額度</span><strong>NT$ ${money(limit)}</strong><span>已使用（估算）</span><strong>NT$ ${money(used)}</strong><span>剩餘額度</span><strong style="color:${remain < 0 ? '#c0392b' : '#16834a'}">NT$ ${money(remain)}</strong><div style="height:8px;background:#e7ece9;border-radius:20px;overflow:hidden"><div style="height:8px;width:${pct}%;background:${remain < 0 ? '#c0392b' : '#239b62'}"></div></div><small>${pct.toFixed(0)}% 已使用</small><div><button class="linkbtn" data-edit-wallet="${esc(wallet.id)}">編輯額度</button> <button class="linkbtn danger" data-delete-wallet="${esc(wallet.id)}">刪除卡片</button></div></div>`;
+  }).join("");
+  const totalLimit = db.wallets.reduce((s,w)=>s+(Number(w.limit)||0),0);
+  const totalUsed = db.wallets.reduce((s,w)=>s+db.cards.filter(c=>c.walletId===w.id || (!c.walletId && c.card===w.name)).reduce((a,c)=>a+estimatedTWD(c),0),0);
+  return `<div class="grid">${cards}<div class="stat"><span>所有虛擬卡合計額度</span><strong>NT$ ${money(totalLimit)}</strong><span>預估已使用</span><strong>NT$ ${money(totalUsed)}</strong><span>預估剩餘</span><strong style="color:#16834a">NT$ ${money(totalLimit-totalUsed)}</strong></div></div>`;
+}
+function cardSummary(list) {
+  const twd = list.reduce((sum, card) => sum + estimatedTWD(card), 0);
+  const currencies = {};
+  list.forEach(card => { const currency = card.currency || "未填幣別"; currencies[currency] = (currencies[currency] || 0) + (Number(card.amount) || 0); });
+  const foreign = Object.entries(currencies).map(([currency, amount]) => `${esc(currency)} ${money(amount)}`).join(" ／ ") || "—";
+  return `<div class="grid"><div class="stat"><span>刷卡筆數</span><strong>${list.length}</strong></div><div class="stat"><span>台幣預估金額</span><strong>NT$ ${money(twd)}</strong></div><div class="stat"><span>原幣金額（依幣別分開）</span><strong style="font-size:1rem">${foreign}</strong></div></div>`;
+}
+function cardTable(list = db.cards) {
+  if (!list.length) return '<div class="empty">沒有符合的刷卡紀錄。</div>';
+  return `<div class="table-wrap"><table><thead><tr><th>團號</th><th>刷卡日</th><th>項目／商家</th><th>金額</th><th>幣別</th><th>匯率</th><th>台幣估算</th><th>虛擬卡</th><th>操作</th></tr></thead><tbody>
+    ${list.map(card => `<tr><td>${esc(card.group)}</td><td>${fmt(card.date)}</td><td>${esc(card.merchant || card.purpose)}</td><td>${money(card.amount)}</td><td>${esc(card.currency)}</td><td>${rateFor(card.currency).toLocaleString("en-US",{maximumFractionDigits:4})}</td><td>NT$ ${money(estimatedTWD(card))}</td><td>${esc(walletName(card))}</td><td><button class="linkbtn" data-edit-card="${esc(card.id)}">編輯</button> <button class="linkbtn danger" data-delete-card="${esc(card.id)}">刪除</button></td></tr>`).join("")}
     </tbody></table></div>`;
 }
-
-function remitTable() {
-  if (!db.remits.length) return '<div class="empty">尚無共同匯款紀錄。</div>';
-  return `<div class="table-wrap"><table><thead><tr><th>供應商</th><th>送單日</th><th>匯款日</th><th>團號／負責人／金額</th><th>Bank fee</th><th>Total</th><th>操作</th></tr></thead><tbody>
-    ${db.remits.map(remit => `<tr><td>${esc(remit.vendor)}</td><td>${fmt(remit.sent)}</td><td>${fmt(remit.paid)}</td>
-      <td>${(remit.items || []).map(item => `${esc(item.group)} / ${esc(item.owner)} / ${esc(item.amount)}`).join("<br>")}</td>
-      <td>${esc(remit.currency)} ${esc(remit.fee)}</td><td><b>${esc(remit.currency)} ${esc(remit.total)}</b></td>
-      <td><button class="linkbtn" data-edit-remit="${esc(remit.id)}">編輯</button> <button class="linkbtn danger" data-delete-remit="${esc(remit.id)}">刪除</button></td></tr>`).join("")}
-    </tbody></table></div>`;
+function remitTable(list = db.remits) {
+  if (!list.length) return '<div class="empty">沒有符合的共同匯款紀錄。</div>';
+  return `<div style="display:grid;gap:14px">${list.slice().sort((a,b)=>(b.sent||"").localeCompare(a.sent||"")).map(remit => {
+    const items = remit.items || [];
+    const subtotal = items.reduce((sum,item)=>sum+(Number(item.amount)||0),0);
+    const total = Number(remit.total ?? (subtotal + (Number(remit.fee)||0)));
+    return `<section class="panel" style="margin:0;padding:14px;border:1px solid #dfe7e2"><div class="row between" style="flex-wrap:wrap"><div><h3 style="margin:0 0 6px">${esc(remit.vendor)}</h3><small class="muted">送單：${fmt(remit.sent)}　匯款：${fmt(remit.paid)}　｜　幣別：${esc(remit.currency || "EUR")}</small></div><div><button class="linkbtn" data-edit-remit="${esc(remit.id)}">編輯</button> <button class="linkbtn danger" data-delete-remit="${esc(remit.id)}">刪除</button></div></div>
+      <div class="table-wrap"><table><thead><tr><th>NO</th><th>GROUP NO.</th><th>AMOUNT</th><th>TO</th></tr></thead><tbody>${items.map((item,i)=>`<tr><td>${i+1}</td><td>${esc(item.group)}</td><td>${esc(remit.currency||"EUR")} ${money(item.amount)}</td><td>${esc(item.owner)}</td></tr>`).join("")}</tbody></table></div>
+      <div class="row between" style="margin-top:8px;flex-wrap:wrap"><span>Bank fee：${esc(remit.currency||"EUR")} ${money(remit.fee)}</span><b>Total：${esc(remit.currency||"EUR")} ${money(total)}</b></div></section>`;
+  }).join("")}</div>`;
+}
+function toolTable(list = db.tools) {
+  if (!list.length) return '<div class="empty">尚無工具捷徑。點選「新增捷徑」，加入常用 Google Sheets 網址。</div>';
+  return `<div class="grid">${list.map(tool=>`<div class="stat"><div class="row between"><strong>${esc(tool.name)}</strong><span>↗</span></div><p class="muted" style="word-break:break-all">${esc(tool.url)}</p><div class="row"><a class="btn" href="${esc(tool.url)}" target="_blank" rel="noopener">開啟連結 ↗</a><button class="linkbtn" data-edit-tool="${esc(tool.id)}">編輯</button><button class="linkbtn danger" data-delete-tool="${esc(tool.id)}">刪除</button></div></div>`).join("")}</div>`;
 }
 
 function openModal(html) {
@@ -243,25 +287,68 @@ function groupForm(group = {}) {
 }
 
 function cardForm(card = {}) {
+  const walletOptions = db.wallets.map(w=>w.name);
+  const currentWallet = card.walletId ? db.wallets.find(w=>w.id===card.walletId)?.name : (card.card || "");
+  const currencyOptions = ["EUR","NOK","SEK","DKK","ISK"];
   openModal(`<h2>${card.id ? "編輯" : "新增"}虛擬卡刷卡</h2><form id="cardForm"><div class="formgrid">
-    ${field("刷卡日期", "date", card.date || today(), true, "date")}
     ${field("團號", "group", card.group)}
-    ${field("商家", "merchant", card.merchant)}
-    ${field("用途", "purpose", card.purpose)}
-    ${field("幣別", "currency", card.currency || "EUR")}
-    ${field("原幣金額", "amount", card.amount)}
-    ${field("台幣實際扣款", "twd", card.twd)}
-    ${field("卡片識別", "card", card.card)}
-  </div><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存</button></div></form>`);
+    ${field("刷卡日期", "date", card.date || today(), true, "date")}
+    ${field("項目／商家", "merchant", card.merchant || card.purpose)}
+    ${field("金額", "amount", card.amount, true, "number")}
+    ${field("幣別", "currency", card.currency || "EUR", true, "select", currencyOptions)}
+    ${field("使用虛擬卡", "walletName", currentWallet, true, "select", walletOptions.length ? walletOptions : ["請先新增虛擬卡"])}
+    <label class="field full">備註<textarea name="note" rows="3">${esc(card.note || "")}</textarea></label>
+  </div><p class="muted">台幣金額依上方參考匯率自動估算；不代表銀行實際扣款。</p><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存</button></div></form>`);
   $("#cancel").onclick = closeModal;
   $("#cardForm").onsubmit = event => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
+    const wallet = db.wallets.find(w=>w.name===data.walletName);
+    data.walletId = wallet?.id || "";
+    data.card = data.walletName === "請先新增虛擬卡" ? (card.card || "") : data.walletName;
+    delete data.walletName;
+    data.twd = estimatedTWD({currency:data.currency,amount:data.amount}).toFixed(2);
     data.id = card.id || uid();
     db.cards = db.cards.filter(item => item.id !== data.id).concat(data);
-    closeModal();
-    save();
+    closeModal(); save();
   };
+}
+function walletForm(wallet = {}) {
+  openModal(`<h2>${wallet.id ? "編輯" : "新增"}虛擬卡</h2><form id="walletForm"><div class="formgrid">
+    ${field("卡片名稱／識別", "name", wallet.name, true)}
+    ${field("台幣額度", "limit", wallet.limit ?? "", true, "number")}
+    ${field("開卡日", "start", wallet.start || today(), false, "date")}
+    ${field("到期日", "expiry", wallet.expiry || addDays(today(),30), false, "date")}
+  </div><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存卡片</button></div></form>`);
+  $("#cancel").onclick=closeModal;
+  $("#walletForm").onsubmit=event=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.target));data.limit=Number(data.limit)||0;data.id=wallet.id||uid();db.wallets=db.wallets.filter(w=>w.id!==data.id).concat(data);closeModal();save();};
+}
+function manageWallets() {
+  openModal(`<h2>虛擬卡額度管理</h2><p class="muted">每張卡獨立設定台幣額度及效期；刷卡明細仍共用同一張表。</p><div class="row between"><span>目前 ${db.wallets.length} 張卡</span><button type="button" class="btn" id="newWallet">＋ 新增虛擬卡</button></div><div class="table-wrap"><table><thead><tr><th>卡片</th><th>台幣額度</th><th>開卡日</th><th>到期日</th><th>操作</th></tr></thead><tbody>${db.wallets.map(w=>`<tr><td>${esc(w.name)}</td><td>NT$ ${money(w.limit)}</td><td>${fmt(w.start)}</td><td>${fmt(w.expiry)}</td><td><button class="linkbtn" data-modal-edit-wallet="${esc(w.id)}">編輯</button></td></tr>`).join("")||'<tr><td colspan="5">尚未新增虛擬卡</td></tr>'}</tbody></table></div><div class="modal-actions"><button type="button" class="btn light" id="cancel">關閉</button></div>`);
+  $("#cancel").onclick=closeModal;
+  $("#newWallet").onclick=()=>walletForm();
+  $("[data-modal-edit-wallet]")?.addEventListener("click",e=>{const w=db.wallets.find(x=>x.id===e.currentTarget.dataset.modalEditWallet);if(w)walletForm(w);});
+}
+function rateForm() {
+  openModal(`<h2>設定參考匯率</h2><p class="muted">輸入 1 單位外幣約等於多少新台幣。</p><form id="rateForm"><div class="formgrid">${["EUR","NOK","SEK","DKK","ISK"].map(c=>field(c,"rate_"+c,db.fxRates[c]||"",true,"number")).join("")}</div><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存匯率</button></div></form>`);
+  $("#cancel").onclick=closeModal;
+  $("#rateForm").onsubmit=e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target));["EUR","NOK","SEK","DKK","ISK"].forEach(c=>db.fxRates[c]=Number(d["rate_"+c])||db.fxRates[c]);db.fxUpdatedAt="手動設定："+new Date().toLocaleString("zh-TW");closeModal();save();};
+}
+async function refreshRates() {
+  const button=$("#refreshRates"); if(button){button.disabled=true;button.textContent="更新中…";}
+  try {
+    // 公開匯率服務，非 Google 官方 API；以 TWD 為基準，反算每單位外幣的台幣價格。
+    const response=await fetch("https://open.er-api.com/v6/latest/TWD",{cache:"no-store"});
+    if(!response.ok) throw new Error("匯率服務暫時無法連線");
+    const json=await response.json(); if(json.result!=="success") throw new Error("匯率資料格式不正確");
+    ["EUR","NOK","SEK","DKK","ISK"].forEach(c=>{const foreignPerTwd=Number(json.rates?.[c]);if(foreignPerTwd>0)db.fxRates[c]=1/foreignPerTwd;});
+    db.fxUpdatedAt=new Date().toLocaleString("zh-TW"); save();
+  } catch(error) { alert("目前無法自動更新匯率，請稍後再試，或使用「設定匯率」手動輸入。\n"+error.message); if(button){button.disabled=false;button.textContent="更新匯率";} }
+}
+function toolForm(tool = {}) {
+  openModal(`<h2>${tool.id?"編輯":"新增"}工作捷徑</h2><form id="toolForm"><div class="formgrid">${field("捷徑名稱", "name", tool.name, true)}${field("Google Sheets／其他網址", "url", tool.url, true, "url")}</div><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存捷徑</button></div></form>`);
+  $("#cancel").onclick=closeModal;
+  $("#toolForm").onsubmit=e=>{e.preventDefault();const data=Object.fromEntries(new FormData(e.target));if(!/^https?:\/\//i.test(data.url)){alert("請輸入以 https:// 或 http:// 開頭的完整網址");return;}data.id=tool.id||uid();db.tools=db.tools.filter(x=>x.id!==data.id).concat(data);closeModal();save();};
 }
 
 function remitForm(remit = {}) {
@@ -314,6 +401,10 @@ $("#content")?.addEventListener("click", event => {
   if (target.id === "addGroup") groupForm();
   if (target.id === "addCard") cardForm();
   if (target.id === "addRemit") remitForm();
+  if (target.id === "addTool") toolForm();
+  if (target.id === "manageWallets") manageWallets();
+  if (target.id === "editRates") rateForm();
+  if (target.id === "refreshRates") refreshRates();
   if (target.id === "export") exportBackup();
   if (target.dataset.go) { view = target.dataset.go; render(); }
 
@@ -325,6 +416,10 @@ $("#content")?.addEventListener("click", event => {
     db.groups = db.groups.filter(item => item.id !== target.dataset.deleteGroup);
     save();
   }
+  if (target.dataset.editWallet) { const wallet=db.wallets.find(item=>item.id===target.dataset.editWallet); if(wallet) walletForm(wallet); }
+  if (target.dataset.deleteWallet && confirm("刪除卡片設定？既有刷卡紀錄不會刪除。")) { db.wallets=db.wallets.filter(item=>item.id!==target.dataset.deleteWallet); save(); }
+  if (target.dataset.editTool) { const tool=db.tools.find(item=>item.id===target.dataset.editTool); if(tool) toolForm(tool); }
+  if (target.dataset.deleteTool && confirm("確定刪除這個捷徑嗎？")) { db.tools=db.tools.filter(item=>item.id!==target.dataset.deleteTool); save(); }
   if (target.dataset.editCard) {
     const card = db.cards.find(item => item.id === target.dataset.editCard);
     if (card) cardForm(card);
@@ -354,6 +449,19 @@ $("#content")?.addEventListener("input", event => {
     const rows = $("#groupRows");
     if (rows) rows.innerHTML = groupTable(list);
   }
+  if (event.target.id === "cardSearch") {
+    const q = event.target.value.trim().toLowerCase();
+    const list = db.cards.filter(card => [card.group, card.merchant, card.purpose, card.card, walletName(card), card.note].join(" ").toLowerCase().includes(q));
+    const summary = $("#cardSummary"), rows = $("#cardRows");
+    if (summary) summary.innerHTML = cardSummary(list);
+    if (rows) rows.innerHTML = cardTable(list);
+  }
+  if (event.target.id === "remitSearch" || event.target.id === "remitCurrency") {
+    const q = $("#remitSearch")?.value.trim().toLowerCase() || "";
+    const currency = $("#remitCurrency")?.value || "";
+    const list = db.remits.filter(remit => (!currency || remit.currency===currency) && [remit.vendor, ...(remit.items || []).flatMap(item => [item.group, item.owner])].join(" ").toLowerCase().includes(q));
+    const rows = $("#remitRows"); if (rows) rows.innerHTML = remitTable(list);
+  }
 });
 
 $("#content")?.addEventListener("change", event => {
@@ -377,7 +485,7 @@ $("#content")?.addEventListener("change", event => {
           throw new Error("備份格式不正確");
         }
         if (confirm("匯入備份會取代目前這個瀏覽器內的工作資料，建議先匯出舊資料。確定要繼續嗎？")) {
-          db = { groups: imported.groups.map(item => ({ ...item, deadlineDone: item.deadlineDone && typeof item.deadlineDone === "object" ? item.deadlineDone : {} })), cards: imported.cards, remits: imported.remits };
+          db = { groups: imported.groups.map(item => ({ ...item, deadlineDone: item.deadlineDone && typeof item.deadlineDone === "object" ? item.deadlineDone : {} })), cards: imported.cards, remits: imported.remits, wallets: Array.isArray(imported.wallets) ? imported.wallets : [], fxRates: imported.fxRates || { EUR:37,NOK:3.5,SEK:3.3,DKK:4.9,ISK:0.27 }, fxUpdatedAt: imported.fxUpdatedAt || "", tools: Array.isArray(imported.tools) ? imported.tools : [] };
           save();
           alert("備份匯入完成！");
         }
