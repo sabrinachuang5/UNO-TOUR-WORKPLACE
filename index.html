@@ -10,24 +10,44 @@
 <body>
 <div class="app">
   <aside class="sidebar">
-    <div class="brand"><div class="brand-mark">U</div><div><b>UNO TOUR</b><small>WORKPLACE</small></div></div>
+    <div class="brand">
+      <div class="brand-mark">U</div>
+      <div>
+        <b>UNO TOUR</b>
+        <small>WORKPLACE</small>
+      </div>
+    </div>
+
     <nav id="nav">
       <button class="nav active" data-view="dashboard">▦　工作總覽</button>
       <button class="nav" data-view="groups">▤　團體總表</button>
       <button class="nav" data-view="deadlines">◷　Deadline 管理</button>
       <button class="nav" data-view="cards">▣　虛擬卡記帳</button>
       <button class="nav" data-view="remits">⇄　共同匯款紀錄</button>
-      <button class="nav" data-view="tools">⚙ 工作工具箱</button>
+      <button class="nav" data-view="toolbox">⚙ 工作工具箱</button>
       <button class="nav" data-view="backup">↥　資料備份</button>
     </nav>
-    <div class="side-note">資料儲存在目前瀏覽器。請定期匯出備份。</div>
+
+    <div class="side-note">
+      資料儲存在目前瀏覽器。請定期匯出備份。
+    </div>
   </aside>
+
   <main>
-    <header class="topbar"><div><span class="eyebrow">TRAVEL OPERATIONS</span><h1 id="pageTitle">工作總覽</h1></div><button class="primary" id="quickAdd">＋ 新增團體</button></header>
+    <header class="topbar">
+      <div>
+        <span class="eyebrow">TRAVEL OPERATIONS</span>
+        <h1 id="pageTitle">工作總覽</h1>
+      </div>
+      <button class="primary" id="quickAdd">＋ 新增團體</button>
+    </header>
+
     <section id="content"></section>
   </main>
 </div>
+
 <div id="modalRoot"></div>
+
 <script type="module" src="./app.js"></script>
 </body>
 </html>
