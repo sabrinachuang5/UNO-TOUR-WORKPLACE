@@ -59,7 +59,7 @@ function deadlineItems(group) {
     { key: "qtn", name: "QTN", date: group.qtn || addDays(group.depart, -20) },
     { key: "meetingDocs", name: "說明會資料", date: group.meetingDocs || addDays(group.depart, -7) },
     { key: "itin", name: "初版 ITIN", date: group.itin || addDays(group.depart, -6) },
-    { key: "groupSheet", name: "團支表", date: group.groupSheet || addDays(group.depart, -4) },
+    { key: "groupSheet", name: "團表表", date: group.groupSheet || addDays(group.depart, -4) },
     { key: "handover", name: "交接", date: group.handover || addDays(group.depart, -1) }
   ].map(item => ({ ...item, done: Boolean(done[item.key]) }));
 }
@@ -107,8 +107,9 @@ function render() {
     content.innerHTML = `
       <div class="panel">
         <div class="row between"><h2>團體總表</h2><button class="btn" id="addGroup">＋ 新增團體</button></div>
-        <div class="toolbar"><input id="search" placeholder="搜尋團號／分類"><select id="year"><option value="">全部年份</option>${years.map(year => `<option value="${year}">${year}</option>`).join("")}</select></div>
-        <div id="groupRows">${groupTable(db.groups)}</div>
+        <div class="toolbar"><input id="search" placeholder="搜尋團號／分類"><select id="year"><option value="">全部年份</option>${years.map(year => `<option value="${year}">${year}</option>`).join("")}</select><select id="month"><option value="">全部月份</option>${Array.from({length:12},(_,i)=>`<option value="${String(i+1).padStart(2,"0")}">${i+1} 月</option>`).join("")}</select></div>
+        <p class="muted">團體依出發日期由近到遠排列，可用年份及月份篩選。</p>
+        <div id="groupRows">${groupTable([...db.groups].sort((a,b)=>(a.depart||"9999-99-99").localeCompare(b.depart||"9999-99-99")))}</div>
       </div>`;
   }
 
@@ -116,7 +117,7 @@ function render() {
     const list = db.groups.flatMap(group => deadlineItems(group).map(item => ({ ...item, group })))
       .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
     content.innerHTML = `<div class="panel"><h2>所有團體期限</h2>
-      <p class="muted">預設規則：QTN 出發前 20 天、說明會資料前 7 天、初版 ITIN 前 6 天、團支表前 4 天、交接前 1 天。可在團體資料中個別調整。已結團及取消團體不列入。</p>
+      <p class="muted">預設規則：QTN 出發前 20 天、說明會資料前 7 天、初版 ITIN 前 6 天、團表表前 4 天、交接前 1 天。可在團體資料中個別調整。已結團及取消團體不列入。</p>
       ${deadlineTable(list)}</div>`;
   }
 
@@ -439,13 +440,15 @@ $("#content")?.addEventListener("click", event => {
 });
 
 $("#content")?.addEventListener("input", event => {
-  if (event.target.id === "search" || event.target.id === "year") {
+  if (["search", "year", "month"].includes(event.target.id)) {
     const query = $("#search")?.value.toLowerCase() || "";
     const year = $("#year")?.value || "";
+    const month = $("#month")?.value || "";
     const list = db.groups.filter(group =>
       (!year || (group.depart || "").startsWith(year)) &&
+      (!month || (group.depart || "").slice(5, 7) === month) &&
       [group.code, group.category].join(" ").toLowerCase().includes(query)
-    );
+    ).sort((a,b)=>(a.depart||"9999-99-99").localeCompare(b.depart||"9999-99-99"));
     const rows = $("#groupRows");
     if (rows) rows.innerHTML = groupTable(list);
   }
