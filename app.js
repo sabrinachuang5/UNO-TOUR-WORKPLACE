@@ -226,7 +226,7 @@ function closeModal() { $("#modalRoot").innerHTML = ""; }
 function field(label, name, value = "", required = false, type = "text", options = []) {
   const control = type === "select"
     ? `<select name="${name}" ${required ? "required" : ""}>${options.map(option => `<option value="${esc(option)}" ${option === value ? "selected" : ""}>${esc(option)}</option>`).join("")}</select>`
-    : `<input name="${name}" type="${type}" value="${esc(value || "")}" ${required ? "required" : ""}>`;
+    : `<input name="${name}" type="${type}" value="${esc(value || "")}" ${type === "number" ? 'step="0.01"' : ""} ${required ? "required" : ""}>`;
   return `<label class="field">${label}${control}</label>`;
 }
 
