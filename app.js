@@ -59,7 +59,7 @@ function deadlineItems(group) {
     { key: "qtn", name: "QTN", date: group.qtn || addDays(group.depart, -20) },
     { key: "meetingDocs", name: "說明會資料", date: group.meetingDocs || addDays(group.depart, -7) },
     { key: "itin", name: "初版 ITIN", date: group.itin || addDays(group.depart, -6) },
-    { key: "groupSheet", name: "團表表", date: group.groupSheet || addDays(group.depart, -4) },
+    { key: "groupSheet", name: "團支表", date: group.groupSheet || addDays(group.depart, -4) },
     { key: "handover", name: "交接", date: group.handover || addDays(group.depart, -1) }
   ].map(item => ({ ...item, done: Boolean(done[item.key]) }));
 }
@@ -116,7 +116,7 @@ function render() {
     const list = db.groups.flatMap(group => deadlineItems(group).map(item => ({ ...item, group })))
       .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
     content.innerHTML = `<div class="panel"><h2>所有團體期限</h2>
-      <p class="muted">預設規則：QTN 出發前 20 天、說明會資料前 7 天、初版 ITIN 前 6 天、團表表前 4 天、交接前 1 天。可在團體資料中個別調整。已結團及取消團體不列入。</p>
+      <p class="muted">預設規則：QTN 出發前 20 天、說明會資料前 7 天、初版 ITIN 前 6 天、團支表前 4 天、交接前 1 天。可在團體資料中個別調整。已結團及取消團體不列入。</p>
       ${deadlineTable(list)}</div>`;
   }
 
