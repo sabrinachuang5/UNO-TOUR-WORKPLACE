@@ -155,7 +155,7 @@ function groupTable(list) {
       <td>${fmt(group.go)}</td><td>${esc(group.pax)}</td><td>${esc(group.status || "準備中")}</td>
       <td>${fmt(group.meeting)}</td>
       <td>${group.sheet ? `<a href="${esc(group.sheet)}" target="_blank" rel="noopener">開啟 ↗</a>` : "—"}</td>
-      <td>${group.itinLink ? `<a href="${esc(group.itinLink)}" target="_blank" rel="noopener">開啟 ↗</a>` : "—"}</td>
+     <td>${group.itinLink ? `<a href="#" class="itin-copy-link" data-copy-itin="${esc(group.itinLink)}">開啟 ↗</a>` : "—"}</td>
       <td><button class="linkbtn" data-edit-group="${esc(group.id)}">編輯</button> <button class="linkbtn danger" data-delete-group="${esc(group.id)}">刪除</button></td>
     </tr>`).join("")}</tbody></table></div>`;
 }
