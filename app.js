@@ -396,7 +396,33 @@ $("#nav")?.addEventListener("click", event => {
 });
 $("#quickAdd")?.addEventListener("click", () => groupForm());
 
-$("#content")?.addEventListener("click", event => {
+$("#content")?.addEventListener("click", async event => {
+
+  // 英文 ITIN：點擊後複製公司內部路徑
+  const itinLink = event.target.closest("[data-copy-itin]");
+
+  if (itinLink) {
+    event.preventDefault();
+    const path = itinLink.dataset.copyItin;
+
+    try {
+      await navigator.clipboard.writeText(path);
+      alert("英文 ITIN 路徑已複製！請貼到檔案總管的地址列。");
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = path;
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand("copy");
+      textarea.remove();
+
+      alert(copied
+        ? "英文 ITIN 路徑已複製！請貼到檔案總管的地址列。"
+        : "複製失敗，請手動複製路徑。");
+    }
+    return;
+  }
+
   const target = event.target.closest("button");
   if (!target) return;
   if (target.id === "addGroup") groupForm();
