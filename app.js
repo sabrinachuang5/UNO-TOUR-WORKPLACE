@@ -58,6 +58,12 @@ function deadlineItems(group) {
     { name: "交接", date: group.handover || addDays(group.depart, -1) }
   ];
 }
+function deadlineKey(group, name) {
+  return `${group.id}::${name}`;
+}
+function isDeadlineDone(group, name) {
+  return Boolean(group.completedDeadlines?.[name]);
+}
 function pageTitle(page) {
   return ({
     dashboard: "工作總覽", groups: "團體總表", deadlines: "Deadline 管理",
@@ -78,7 +84,7 @@ function render() {
     const activeGroups = db.groups.filter(isActive);
     const allDeadlines = activeGroups.flatMap(group =>
       deadlineItems(group).map(item => ({ ...item, group }))
-    ).filter(item => item.date);
+    ).filter(item => item.date && !isDeadlineDone(item.group, item.name));
     const upcoming = allDeadlines
       .filter(item => item.date >= today())
       .sort((a, b) => a.date.localeCompare(b.date))
@@ -148,8 +154,15 @@ function groupTable(list) {
 
 function deadlineTable(list) {
   if (!list.length) return '<div class="empty">目前沒有期限資料。</div>';
-  return `<div class="table-wrap"><table><thead><tr><th>Deadline</th><th>工作項目</th><th>團號</th><th>出發日</th><th>負責 OP</th></tr></thead><tbody>
-    ${list.map(item => `<tr><td class="${item.date < today() ? "due" : ""}">${fmt(item.date)}</td><td>${esc(item.name)}</td><td>${esc(item.group.code)}</td><td>${fmt(item.group.depart)}</td><td>${esc(item.group.op)}</td></tr>`).join("")}
+  return `<div class="table-wrap"><table><thead><tr><th>完成</th><th>Deadline</th><th>工作項目</th><th>團號</th><th>出發日</th><th>負責 OP</th></tr></thead><tbody>
+    ${list.map(item => {
+      const done = isDeadlineDone(item.group, item.name);
+      return `<tr style="${done ? 'background:#f1f2f0;color:#929a94;' : ''}">
+        <td><input type="checkbox" class="deadline-check" data-deadline-group="${esc(item.group.id)}" data-deadline-name="${esc(item.name)}" ${done ? 'checked' : ''} aria-label="完成 ${esc(item.name)}"></td>
+        <td class="${!done && item.date < today() ? "due" : ""}" style="${done ? 'color:#929a94;' : ''}">${fmt(item.date)}</td>
+        <td>${esc(item.name)}</td><td>${esc(item.group.code)}</td><td>${fmt(item.group.depart)}</td><td>${esc(item.group.op)}</td>
+      </tr>`;
+    }).join("")}
     </tbody></table></div>`;
 }
 
@@ -233,6 +246,10 @@ function groupForm(group = {}) {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(form));
     data.id = group.id || uid();
+    if (group.id) {
+      const existing = db.groups.find(item => item.id === group.id);
+      if (existing?.completedDeadlines) data.completedDeadlines = existing.completedDeadlines;
+    }
     db.groups = db.groups.filter(item => item.id !== data.id).concat(data);
     closeModal();
     save();
@@ -377,6 +394,16 @@ $("#content")?.addEventListener("input", event => {
 });
 
 $("#content")?.addEventListener("change", event => {
+  if (event.target.matches(".deadline-check")) {
+    const group = db.groups.find(item => item.id === event.target.dataset.deadlineGroup);
+    const name = event.target.dataset.deadlineName;
+    if (group && name) {
+      group.completedDeadlines = group.completedDeadlines || {};
+      group.completedDeadlines[name] = event.target.checked;
+      save();
+    }
+    return;
+  }
   if (event.target.id === "import" && event.target.files?.[0]) {
     const reader = new FileReader();
     reader.onload = () => {
