@@ -26,9 +26,12 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({
 }[char]));
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
+let loadFailed = false;
 function loadDB() {
+  let raw = null;
   try {
-    const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+    raw = localStorage.getItem(KEY);
+    const saved = JSON.parse(raw || "{}");
     return {
       groups: Array.isArray(saved.groups) ? saved.groups.map(item => ({ ...item, id: item.id || uid(), deadlineDone: item.deadlineDone && typeof item.deadlineDone === "object" ? item.deadlineDone : {} })) : [],
       cards: Array.isArray(saved.cards) ? saved.cards.map(item => ({ ...item, id: item.id || uid() })) : [],
@@ -36,17 +39,29 @@ function loadDB() {
       wallets: Array.isArray(saved.wallets) ? saved.wallets.map(item => ({ ...item, id: item.id || uid() })) : [],
       fxRates: saved.fxRates && typeof saved.fxRates === "object" ? saved.fxRates : { EUR: 37, NOK: 3.5, SEK: 3.3, DKK: 4.9, ISK: 0.27 },
       fxUpdatedAt: saved.fxUpdatedAt || "",
+      lastBackupAt: saved.lastBackupAt || "",
       tools: Array.isArray(saved.tools) ? saved.tools.map(item => ({ ...item, id: item.id || uid() })) : []
     };
   } catch {
+    if (raw) { try { localStorage.setItem(KEY + "-broken-" + Date.now(), raw); } catch {} loadFailed = true; }
     return { groups: [], cards: [], remits: [], wallets: [], fxRates: { EUR: 37, NOK: 3.5, SEK: 3.3, DKK: 4.9, ISK: 0.27 }, fxUpdatedAt: "", tools: [] };
   }
 }
 let db = loadDB();
-let view = "dashboard";
+const VIEWS = ["dashboard", "groups", "deadlines", "cards", "remits", "toolbox", "backup"];
+let view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "dashboard";
+let hideDone = true;
+function go(page) {
+  if (location.hash.slice(1) === page) { view = page; render(); } else { location.hash = page; }
+}
+window.addEventListener("hashchange", () => {
+  const page = location.hash.slice(1);
+  view = VIEWS.includes(page) ? page : "dashboard";
+  render();
+});
 
 function save() {
-  localStorage.setItem(KEY, JSON.stringify(db));
+  try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (error) { alert("資料無法儲存到瀏覽器（可能是儲存空間已滿、或使用無痕模式）。請立刻匯出備份。\n" + error.message); }
   render();
 }
 function isActive(group) {
@@ -63,6 +78,50 @@ function deadlineItems(group) {
     { key: "handover", name: "交接", date: group.handover || addDays(group.depart, -1) }
   ].map(item => ({ ...item, done: Boolean(done[item.key]) }));
 }
+function daysBetween(fromISO, toISO) {
+  const [y1, m1, d1] = fromISO.split("-").map(Number);
+  const [y2, m2, d2] = toISO.split("-").map(Number);
+  return Math.round((new Date(y2, m2 - 1, d2) - new Date(y1, m1 - 1, d1)) / 86400000);
+}
+function backupStatus() {
+  if (!db.lastBackupAt) return { text: "尚未備份過", late: true, days: null };
+  const days = daysBetween(db.lastBackupAt, today());
+  return { text: days <= 0 ? "今天" : `${days} 天前`, late: days > 7, days };
+}
+function walletUsed(wallet) {
+  return db.cards.filter(card => card.walletId === wallet.id || (!card.walletId && card.card === wallet.name)).reduce((sum, card) => sum + estimatedTWD(card), 0);
+}
+function rateUsed(card) {
+  const amount = Number(card.amount) || 0;
+  const rate = amount ? estimatedTWD(card) / amount : rateFor(card.currency);
+  return rate.toLocaleString("en-US", { maximumFractionDigits: 4 });
+}
+function walletAlertPanel() {
+  const rows = [];
+  db.wallets.forEach(wallet => {
+    const reasons = [];
+    const limit = Number(wallet.limit) || 0;
+    const used = walletUsed(wallet);
+    if (wallet.expiry) {
+      const left = daysBetween(today(), wallet.expiry);
+      if (left < 0 && left >= -14) reasons.push(`<span class="due">已過期 ${-left} 天</span>`);
+      else if (left >= 0 && left <= 7) reasons.push(`<span class="due">${left === 0 ? "今天" : left + " 天後"}到期</span>`);
+    }
+    if (limit > 0 && used > limit) reasons.push(`<span class="due">已超額 NT$ ${money(used - limit)}</span>`);
+    else if (limit > 0 && used / limit >= 0.8) reasons.push(`已使用 ${(used / limit * 100).toFixed(0)}%，剩 NT$ ${money(limit - used)}`);
+    if (reasons.length) rows.push(`<tr><td><b>${esc(wallet.name)}</b></td><td>${reasons.join("　")}</td></tr>`);
+  });
+  if (!rows.length) return "";
+  return `<div class="panel"><div class="row between"><h2>虛擬卡提醒</h2><button class="btn light" data-go="cards">前往記帳</button></div><div class="table-wrap"><table><tbody>${rows.join("")}</tbody></table></div></div>`;
+}
+function alertBanner() {
+  const notes = [];
+  if (loadFailed) notes.push("上次讀取瀏覽器資料時發生問題，原本的資料已另存一份在瀏覽器內。請先不要新增資料，並找人協助還原");
+  const b = backupStatus();
+  if (b.late) notes.push(db.lastBackupAt ? `已經 ${b.days} 天沒有匯出備份` : "還沒有匯出過備份");
+  if (!notes.length) return "";
+  return `<div class="panel" style="background:#fff4e5;border:1px solid #f0c27a"><div class="row between"><b>⚠ ${notes.join("；")}</b><button class="btn light" data-go="backup">前往備份</button></div></div>`;
+}
 function pageTitle(page) {
   return ({
     dashboard: "工作總覽", groups: "團體總表", deadlines: "Deadline 管理",
@@ -75,6 +134,11 @@ function render() {
   const content = $("#content");
   if (!title || !content) return;
   title.textContent = pageTitle(view);
+  const sideNote = $(".side-note");
+  if (sideNote) {
+    const b = backupStatus();
+    sideNote.innerHTML = `資料儲存在目前瀏覽器。<br><span style="${b.late ? "color:#ffb4a6;font-weight:700" : ""}">上次備份：${b.text}</span>`;
+  }
   document.querySelectorAll(".nav").forEach(button => {
     button.classList.toggle("active", button.dataset.view === view);
   });
@@ -85,20 +149,22 @@ function render() {
       deadlineItems(group).map(item => ({ ...item, group }))
     ).filter(item => item.date && !item.done);
     const upcoming = allDeadlines
-      .filter(item => item.date >= today())
+      .filter(item => item.date)
       .sort((a, b) => a.date.localeCompare(b.date))
-      .slice(0, 8);
+      .slice(0, 10);
     const dueSoon = allDeadlines.filter(item => item.date >= today() && item.date <= addDays(today(), 7)).length;
     const overdue = allDeadlines.filter(item => item.date < today()).length;
 
     content.innerHTML = `
+      ${alertBanner()}
       <div class="grid">
         <div class="stat"><span>管理中團體</span><strong>${activeGroups.length}</strong></div>
         <div class="stat"><span>即將到期項目（7天內）</span><strong>${dueSoon}</strong></div>
         <div class="stat"><span>逾期項目</span><strong class="due">${overdue}</strong></div>
         <div class="stat"><span>虛擬卡紀錄</span><strong>${db.cards.length}</strong></div>
       </div>
-      <div class="panel"><div class="row between"><h2>近期 Deadline</h2><button class="btn light" data-go="deadlines">查看全部</button></div>${deadlineTable(upcoming)}</div>
+      ${walletAlertPanel()}
+      <div class="panel"><div class="row between"><h2>逾期與近期 Deadline</h2><button class="btn light" data-go="deadlines">查看全部</button></div>${deadlineTable(upcoming)}</div>
       <div class="panel"><div class="row between"><h2>近期出發團體</h2><button class="btn light" data-go="groups">團體總表</button></div>${groupTable([...activeGroups].sort((a, b) => (a.depart || "").localeCompare(b.depart || "")).slice(0, 8))}</div>`;
   }
 
@@ -115,8 +181,9 @@ function render() {
 
   if (view === "deadlines") {
     const list = db.groups.flatMap(group => deadlineItems(group).map(item => ({ ...item, group })))
+      .filter(item => !hideDone || !item.done)
       .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-    content.innerHTML = `<div class="panel"><h2>所有團體期限</h2>
+    content.innerHTML = `<div class="panel"><div class="row between"><h2>所有團體期限</h2><label><input type="checkbox" id="hideDone" ${hideDone ? "checked" : ""}> 只看未完成</label></div>
       <p class="muted">預設規則：QTN 出發前 20 天、說明會資料前 7 天、初版 ITIN 前 6 天、團支表前 4 天、交接前 1 天。可在團體資料中個別調整。已結團及取消團體不列入。</p>
       ${deadlineTable(list)}</div>`;
   }
@@ -141,6 +208,7 @@ function render() {
   if (view === "backup") {
     content.innerHTML = `<div class="panel"><h2>資料備份</h2>
       <p>資料只存在目前使用的瀏覽器。請定期匯出 JSON，並妥善保存備份檔。</p>
+      <p><b>上次備份：${backupStatus().text}</b></p>
       <div class="row"><button class="btn" id="export">匯出完整備份</button><label class="btn light">匯入備份<input id="import" type="file" accept=".json,application/json" hidden></label></div>
       <p class="muted">備份包含團體資料、刷卡紀錄、虛擬卡額度、匯率、共同匯款紀錄及工作工具箱捷徑；Google Sheets／Excel 正式文件仍以原始連結為準。</p></div>`;
   }
@@ -155,7 +223,7 @@ function groupTable(list) {
       <td>${fmt(group.go)}</td><td>${esc(group.pax)}</td><td>${esc(group.status || "準備中")}</td>
       <td>${fmt(group.meeting)}</td>
       <td>${group.sheet ? `<a href="${esc(group.sheet)}" target="_blank" rel="noopener">開啟 ↗</a>` : "—"}</td>
-     <td>${group.itinLink ? `<a href="#" class="itin-copy-link" data-copy-itin="${esc(group.itinLink)}">開啟 ↗</a>` : "—"}</td>
+     <td>${group.itinLink ? (/^https?:\/\//i.test(group.itinLink) ? `<a href="${esc(group.itinLink)}" target="_blank" rel="noopener">開啟 ↗</a>` : `<a href="#" class="itin-copy-link" data-copy-itin="${esc(group.itinLink)}">複製路徑 ↗</a>`) : "—"}</td>
       <td><button class="linkbtn" data-edit-group="${esc(group.id)}">編輯</button> <button class="linkbtn danger" data-delete-group="${esc(group.id)}">刪除</button></td>
     </tr>`).join("")}</tbody></table></div>`;
 }
@@ -174,6 +242,12 @@ function money(value, digits = 2) {
 }
 function rateFor(currency) { return Number(db.fxRates?.[currency]) || 0; }
 function estimatedTWD(card) {
+  const actual = Number(card.actualTwd) || 0;
+  if (actual > 0) return actual;
+  const savedRate = Number(card.rate) || 0;
+  if (savedRate > 0) return (Number(card.amount) || 0) * savedRate;
+  const oldTwd = Number(card.twd) || 0;
+  if (oldTwd > 0) return oldTwd;
   const rate = rateFor(card.currency || "EUR");
   return (Number(card.amount) || 0) * rate;
 }
@@ -201,7 +275,7 @@ function cardSummary(list) {
 function cardTable(list = db.cards) {
   if (!list.length) return '<div class="empty">沒有符合的刷卡紀錄。</div>';
   return `<div class="table-wrap"><table><thead><tr><th>團號</th><th>刷卡日</th><th>項目／商家</th><th>金額</th><th>幣別</th><th>匯率</th><th>台幣估算</th><th>虛擬卡</th><th>操作</th></tr></thead><tbody>
-    ${list.map(card => `<tr><td>${esc(card.group)}</td><td>${fmt(card.date)}</td><td>${esc(card.merchant || card.purpose)}</td><td>${money(card.amount)}</td><td>${esc(card.currency)}</td><td>${rateFor(card.currency).toLocaleString("en-US",{maximumFractionDigits:4})}</td><td>NT$ ${money(estimatedTWD(card))}</td><td>${esc(walletName(card))}</td><td><button class="linkbtn" data-edit-card="${esc(card.id)}">編輯</button> <button class="linkbtn danger" data-delete-card="${esc(card.id)}">刪除</button></td></tr>`).join("")}
+    ${list.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(card => `<tr><td>${esc(card.group)}</td><td>${fmt(card.date)}</td><td>${esc(card.merchant || card.purpose)}</td><td>${money(card.amount)}</td><td>${esc(card.currency)}</td><td>${rateUsed(card)}</td><td>NT$ ${money(estimatedTWD(card))}${Number(card.actualTwd) > 0 ? " <small>(實際)</small>" : ""}</td><td>${esc(walletName(card))}</td><td><button class="linkbtn" data-edit-card="${esc(card.id)}">編輯</button> <button class="linkbtn danger" data-delete-card="${esc(card.id)}">刪除</button></td></tr>`).join("")}
     </tbody></table></div>`;
 }
 function remitTable(list = db.remits) {
@@ -227,7 +301,7 @@ function closeModal() { $("#modalRoot").innerHTML = ""; }
 function field(label, name, value = "", required = false, type = "text", options = []) {
   const control = type === "select"
     ? `<select name="${name}" ${required ? "required" : ""}>${options.map(option => `<option value="${esc(option)}" ${option === value ? "selected" : ""}>${esc(option)}</option>`).join("")}</select>`
-    : `<input name="${name}" type="${type}" value="${esc(value || "")}" ${type === "number" ? 'step="0.01"' : ""} ${required ? "required" : ""}>`;
+    : `<input name="${name}" type="${type}" value="${esc(value || "")}" ${type === "number" ? 'step="any"' : ""} ${required ? "required" : ""}>`;
   return `<label class="field">${label}${control}</label>`;
 }
 
@@ -254,7 +328,7 @@ function groupForm(group = {}) {
     ${field("QTN 日期（預設出發前 20 天）", "qtn", defaults.qtn, false, "date")}
     ${field("說明會資料期限（預設前 7 天）", "meetingDocs", defaults.meetingDocs, false, "date")}
     ${field("初版 ITIN（預設前 6 天）", "itin", defaults.itin, false, "date")}
-    ${field("團表表（預設前 4 天）", "groupSheet", defaults.groupSheet, false, "date")}
+    ${field("團支表（預設前 4 天）", "groupSheet", defaults.groupSheet, false, "date")}
     ${field("交接（預設前 1 天）", "handover", defaults.handover, false, "date")}
   </div><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存團體</button></div></form>`);
 
@@ -290,16 +364,17 @@ function groupForm(group = {}) {
 function cardForm(card = {}) {
   const walletOptions = db.wallets.map(w=>w.name);
   const currentWallet = card.walletId ? db.wallets.find(w=>w.id===card.walletId)?.name : (card.card || "");
-  const currencyOptions = ["EUR","NOK","SEK","DKK","ISK"];
+  const currencyOptions = Object.keys(db.fxRates);
   openModal(`<h2>${card.id ? "編輯" : "新增"}虛擬卡刷卡</h2><form id="cardForm"><div class="formgrid">
-    ${field("團號", "group", card.group)}
+    <label class="field">團號<input name="group" value="${esc(card.group || "")}" list="groupCodes" autocomplete="off"></label><datalist id="groupCodes">${db.groups.map(g => `<option value="${esc(g.code)}">`).join("")}</datalist>
     ${field("刷卡日期", "date", card.date || today(), true, "date")}
     ${field("項目／商家", "merchant", card.merchant || card.purpose)}
     ${field("金額", "amount", card.amount, true, "number")}
     ${field("幣別", "currency", card.currency || "EUR", true, "select", currencyOptions)}
     ${field("使用虛擬卡", "walletName", currentWallet, true, "select", walletOptions.length ? walletOptions : ["請先新增虛擬卡"])}
+    ${field("實際台幣金額（選填，有帳單時填寫）", "actualTwd", card.actualTwd || "", false, "number")}
     <label class="field full">備註<textarea name="note" rows="3">${esc(card.note || "")}</textarea></label>
-  </div><p class="muted">台幣金額依上方參考匯率自動估算；不代表銀行實際扣款。</p><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存</button></div></form>`);
+  </div><p class="muted">每筆刷卡會記住儲存當下的匯率，之後更新匯率不會改動舊紀錄。有銀行帳單的實際台幣金額時，填在「實際台幣金額」，就會以實際金額為準。</p><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存</button></div></form>`);
   $("#cancel").onclick = closeModal;
   $("#cardForm").onsubmit = event => {
     event.preventDefault();
@@ -308,7 +383,12 @@ function cardForm(card = {}) {
     data.walletId = wallet?.id || "";
     data.card = data.walletName === "請先新增虛擬卡" ? (card.card || "") : data.walletName;
     delete data.walletName;
-    data.twd = estimatedTWD({currency:data.currency,amount:data.amount}).toFixed(2);
+    const keptRate = card.id && card.currency === data.currency
+      ? (Number(card.rate) || (Number(card.twd) && Number(card.amount) ? Number(card.twd) / Number(card.amount) : 0))
+      : 0;
+    data.rate = keptRate || rateFor(data.currency);
+    data.actualTwd = Number(data.actualTwd) || 0;
+    data.twd = estimatedTWD(data).toFixed(2);
     data.id = card.id || uid();
     db.cards = db.cards.filter(item => item.id !== data.id).concat(data);
     closeModal(); save();
@@ -328,12 +408,12 @@ function manageWallets() {
   openModal(`<h2>虛擬卡額度管理</h2><p class="muted">每張卡獨立設定台幣額度及效期；刷卡明細仍共用同一張表。</p><div class="row between"><span>目前 ${db.wallets.length} 張卡</span><button type="button" class="btn" id="newWallet">＋ 新增虛擬卡</button></div><div class="table-wrap"><table><thead><tr><th>卡片</th><th>台幣額度</th><th>開卡日</th><th>到期日</th><th>操作</th></tr></thead><tbody>${db.wallets.map(w=>`<tr><td>${esc(w.name)}</td><td>NT$ ${money(w.limit)}</td><td>${fmt(w.start)}</td><td>${fmt(w.expiry)}</td><td><button class="linkbtn" data-modal-edit-wallet="${esc(w.id)}">編輯</button></td></tr>`).join("")||'<tr><td colspan="5">尚未新增虛擬卡</td></tr>'}</tbody></table></div><div class="modal-actions"><button type="button" class="btn light" id="cancel">關閉</button></div>`);
   $("#cancel").onclick=closeModal;
   $("#newWallet").onclick=()=>walletForm();
-  $("[data-modal-edit-wallet]")?.addEventListener("click",e=>{const w=db.wallets.find(x=>x.id===e.currentTarget.dataset.modalEditWallet);if(w)walletForm(w);});
+  document.querySelectorAll("[data-modal-edit-wallet]").forEach(btn=>btn.addEventListener("click",e=>{const w=db.wallets.find(x=>x.id===e.currentTarget.dataset.modalEditWallet);if(w)walletForm(w);}));
 }
 function rateForm() {
-  openModal(`<h2>設定參考匯率</h2><p class="muted">輸入 1 單位外幣約等於多少新台幣。</p><form id="rateForm"><div class="formgrid">${["EUR","NOK","SEK","DKK","ISK"].map(c=>field(c,"rate_"+c,db.fxRates[c]||"",true,"number")).join("")}</div><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存匯率</button></div></form>`);
+  openModal(`<h2>設定參考匯率</h2><p class="muted">輸入 1 單位外幣約等於多少新台幣。</p><form id="rateForm"><div class="formgrid">${Object.keys(db.fxRates).map(c=>field(c,"rate_"+c,db.fxRates[c]||"",true,"number")).join("")}${field("新增幣別代碼（例如 USD）","newCode","")}${field("新幣別 1 單位約合台幣","newRate","",false,"number")}</div><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存匯率</button></div></form>`);
   $("#cancel").onclick=closeModal;
-  $("#rateForm").onsubmit=e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target));["EUR","NOK","SEK","DKK","ISK"].forEach(c=>db.fxRates[c]=Number(d["rate_"+c])||db.fxRates[c]);db.fxUpdatedAt="手動設定："+new Date().toLocaleString("zh-TW");closeModal();save();};
+  $("#rateForm").onsubmit=e=>{e.preventDefault();const d=Object.fromEntries(new FormData(e.target));Object.keys(db.fxRates).forEach(c=>db.fxRates[c]=Number(d["rate_"+c])||db.fxRates[c]);const code=(d.newCode||"").trim().toUpperCase();if(/^[A-Z]{3}$/.test(code)&&Number(d.newRate)>0)db.fxRates[code]=Number(d.newRate);db.fxUpdatedAt="手動設定："+new Date().toLocaleString("zh-TW");closeModal();save();};
 }
 async function refreshRates() {
   const button=$("#refreshRates"); if(button){button.disabled=true;button.textContent="更新中…";}
@@ -342,7 +422,7 @@ async function refreshRates() {
     const response=await fetch("https://open.er-api.com/v6/latest/TWD",{cache:"no-store"});
     if(!response.ok) throw new Error("匯率服務暫時無法連線");
     const json=await response.json(); if(json.result!=="success") throw new Error("匯率資料格式不正確");
-    ["EUR","NOK","SEK","DKK","ISK"].forEach(c=>{const foreignPerTwd=Number(json.rates?.[c]);if(foreignPerTwd>0)db.fxRates[c]=1/foreignPerTwd;});
+    Object.keys(db.fxRates).forEach(c=>{const foreignPerTwd=Number(json.rates?.[c]);if(foreignPerTwd>0)db.fxRates[c]=1/foreignPerTwd;});
     db.fxUpdatedAt=new Date().toLocaleString("zh-TW"); save();
   } catch(error) { alert("目前無法自動更新匯率，請稍後再試，或使用「設定匯率」手動輸入。\n"+error.message); if(button){button.disabled=false;button.textContent="更新匯率";} }
 }
@@ -359,7 +439,7 @@ function remitForm(remit = {}) {
     ${field("幣別", "currency", remit.currency || "EUR")}
     ${field("送單日期", "sent", remit.sent || today(), false, "date")}
     ${field("匯款日期", "paid", remit.paid, false, "date")}
-    <label class="field full">參與團體（每行一筆：團號,負責 OP,金額）<textarea name="items" rows="5" placeholder="POR11TK261022A,Shirley,4396&#10;POR11TK261106A,Sabrina,1884">${esc(lines)}</textarea></label>
+    <label class="field full">參與團體（每行一筆：團號,負責 OP,金額；金額可寫 4,396）<textarea name="items" rows="5" placeholder="POR11TK261022A,Shirley,4396&#10;POR11TK261106A,Sabrina,1884">${esc(lines)}</textarea></label>
     ${field("Bank fee", "fee", remit.fee ?? "0")}
   </div><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存紀錄</button></div></form>`);
   $("#cancel").onclick = closeModal;
@@ -367,8 +447,11 @@ function remitForm(remit = {}) {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
     data.items = data.items.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
-      const [groupCode = "", owner = "", amount = "0"] = line.split(",");
-      return { group: groupCode.trim(), owner: owner.trim(), amount: Number(amount.trim()) || 0 };
+      const parts = line.replace(/，/g, ",").split(",");
+      const groupCode = parts[0] || "";
+      const owner = parts[1] || "";
+      const amount = (parts.slice(2).join("") || "0").replace(/[^\d.\-]/g, "");
+      return { group: groupCode.trim(), owner: owner.trim(), amount: Number(amount) || 0 };
     });
     data.fee = Number(data.fee) || 0;
     data.total = data.items.reduce((sum, item) => sum + item.amount, 0) + data.fee;
@@ -380,6 +463,7 @@ function remitForm(remit = {}) {
 }
 
 function exportBackup() {
+  db.lastBackupAt = today();
   const blob = new Blob([JSON.stringify(db, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -387,14 +471,16 @@ function exportBackup() {
   link.download = `uno-tour-backup-${today()}.json`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  save();
 }
 
 // 側邊導覽與頁面操作
 $("#nav")?.addEventListener("click", event => {
   const button = event.target.closest("[data-view]");
-  if (button) { view = button.dataset.view; render(); }
+  if (button) go(button.dataset.view);
 });
 $("#quickAdd")?.addEventListener("click", () => groupForm());
+document.addEventListener("keydown", event => { if (event.key === "Escape") closeModal(); });
 
 $("#content")?.addEventListener("click", async event => {
 
@@ -433,13 +519,13 @@ $("#content")?.addEventListener("click", async event => {
   if (target.id === "editRates") rateForm();
   if (target.id === "refreshRates") refreshRates();
   if (target.id === "export") exportBackup();
-  if (target.dataset.go) { view = target.dataset.go; render(); }
+  if (target.dataset.go) go(target.dataset.go);
 
   if (target.dataset.editGroup) {
     const group = db.groups.find(item => item.id === target.dataset.editGroup);
     if (group) groupForm(group);
   }
-  if (target.dataset.deleteGroup && confirm("確定要刪除這筆團體資料嗎？")) {
+  if (target.dataset.deleteGroup && confirm("確定要刪除這筆團體資料嗎？刪除後無法復原。如果只是團已結束，建議改用「編輯 → 團體狀態：已結團」。")) {
     db.groups = db.groups.filter(item => item.id !== target.dataset.deleteGroup);
     save();
   }
@@ -494,6 +580,7 @@ $("#content")?.addEventListener("input", event => {
 });
 
 $("#content")?.addEventListener("change", event => {
+  if (event.target.id === "hideDone") { hideDone = event.target.checked; render(); return; }
   const deadlineCheckbox = event.target.closest("[data-deadline-group][data-deadline-key]");
   if (deadlineCheckbox) {
     const group = db.groups.find(item => item.id === deadlineCheckbox.dataset.deadlineGroup);
@@ -514,7 +601,7 @@ $("#content")?.addEventListener("change", event => {
           throw new Error("備份格式不正確");
         }
         if (confirm("匯入備份會取代目前這個瀏覽器內的工作資料，建議先匯出舊資料。確定要繼續嗎？")) {
-          db = { groups: imported.groups.map(item => ({ ...item, deadlineDone: item.deadlineDone && typeof item.deadlineDone === "object" ? item.deadlineDone : {} })), cards: imported.cards, remits: imported.remits, wallets: Array.isArray(imported.wallets) ? imported.wallets : [], fxRates: imported.fxRates || { EUR:37,NOK:3.5,SEK:3.3,DKK:4.9,ISK:0.27 }, fxUpdatedAt: imported.fxUpdatedAt || "", tools: Array.isArray(imported.tools) ? imported.tools : [] };
+          db = { groups: imported.groups.map(item => ({ ...item, deadlineDone: item.deadlineDone && typeof item.deadlineDone === "object" ? item.deadlineDone : {} })), cards: imported.cards, remits: imported.remits, wallets: Array.isArray(imported.wallets) ? imported.wallets : [], fxRates: imported.fxRates || { EUR:37,NOK:3.5,SEK:3.3,DKK:4.9,ISK:0.27 }, fxUpdatedAt: imported.fxUpdatedAt || "", lastBackupAt: imported.lastBackupAt || "", tools: Array.isArray(imported.tools) ? imported.tools : [] };
           save();
           alert("備份匯入完成！");
         }
