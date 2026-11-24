@@ -98,7 +98,7 @@ function rateUsed(card) {
 }
 function walletAlertPanel() {
   const rows = [];
-  db.wallets.forEach(wallet => {
+  activeWallets().forEach(wallet => {
     const reasons = [];
     const limit = Number(wallet.limit) || 0;
     const used = walletUsed(wallet);
@@ -121,6 +121,31 @@ function alertBanner() {
   if (b.late) notes.push(db.lastBackupAt ? `已經 ${b.days} 天沒有匯出備份` : "還沒有匯出過備份");
   if (!notes.length) return "";
   return `<div class="panel" style="background:#fff4e5;border:1px solid #f0c27a"><div class="row between"><b>⚠ ${notes.join("；")}</b><button class="btn light" data-go="backup">前往備份</button></div></div>`;
+}
+function walletExpired(w) { return Boolean(w.expiry) && w.expiry < today(); }
+function activeWallets() { return db.wallets.filter(w => !walletExpired(w)); }
+function expiredWallets() { return db.wallets.filter(walletExpired); }
+let cardScope = "active";
+function cardWallet(card) {
+  return card.walletId ? db.wallets.find(w => w.id === card.walletId) : db.wallets.find(w => w.name === card.card);
+}
+function cardsInScope() {
+  if (cardScope === "all") return db.cards;
+  return db.cards.filter(card => {
+    const w = cardWallet(card);
+    const expired = Boolean(w) && walletExpired(w);
+    return cardScope === "expired" ? expired : !expired;
+  });
+}
+function cardScopeSelect() {
+  const opt = (value, label) => `<option value="${value}"${cardScope === value ? " selected" : ""}>${label}</option>`;
+  return `<select id="cardScope">${opt("active", "使用中的卡")}${opt("expired", "已過期的卡")}${opt("all", "全部")}</select>`;
+}
+function expiredWalletSection() {
+  const list = expiredWallets().sort((a, b) => (b.expiry || "").localeCompare(a.expiry || ""));
+  if (!list.length) return "";
+  const rows = list.map(w => `<tr><td>${esc(w.name)}</td><td>${esc(w.expiry)}</td><td>NT$ ${money(w.limit)}</td><td>NT$ ${money(walletUsed(w))}</td><td><button class="linkbtn" data-edit-wallet="${esc(w.id)}">編輯</button> <button class="linkbtn danger" data-delete-wallet="${esc(w.id)}">刪除卡片</button></td></tr>`).join("");
+  return `<details style="margin-top:12px"><summary style="cursor:pointer"><b>已過期的卡（${list.length}）</b></summary><div class="table-wrap"><table><thead><tr><th>卡片</th><th>到期日</th><th>台幣額度</th><th>已使用（估算）</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 function pageTitle(page) {
   return ({
@@ -192,7 +217,7 @@ function render() {
     content.innerHTML = `<div class="panel"><div class="row between"><h2>虛擬卡刷卡紀錄</h2><div class="row"><button class="btn light" id="manageWallets">管理虛擬卡額度</button><button class="btn" id="addCard">＋ 新增刷卡</button></div></div>
       <div class="panel" style="margin:12px 0;padding:14px;background:#f8faf9"><div class="row between"><b>參考匯率（約 NT$）</b><div class="row"><small class="muted">${db.fxUpdatedAt ? `最後更新：${esc(db.fxUpdatedAt)}` : "尚未更新，使用預設值"}</small><button class="btn light" id="refreshRates">更新匯率</button><button class="btn light" id="editRates">設定匯率</button></div></div><div class="grid">${Object.entries(db.fxRates).map(([c,r])=>`<div class="stat"><span>${esc(c)}</span><strong>NT$ ${Number(r).toLocaleString("en-US",{maximumFractionDigits:4})}</strong></div>`).join("")}</div><p class="muted">匯率為外部參考資料估算，非 Google 官方報價或銀行實際扣款；可手動調整。</p></div>
       <div id="walletSummary">${walletSummary()}</div>
-      <div class="toolbar"><input id="cardSearch" placeholder="搜尋團號／項目／商家／卡片"></div><div id="cardSummary">${cardSummary(db.cards)}</div><div id="cardRows">${cardTable(db.cards)}</div></div>`;
+      <div class="toolbar"><input id="cardSearch" placeholder="搜尋團號／項目／商家／卡片">${cardScopeSelect()}</div><div id="cardSummary">${cardSummary(cardsInScope())}</div><div id="cardRows">${cardTable(cardsInScope())}</div></div>`;
   }
 
   if (view === "remits") {
@@ -254,16 +279,16 @@ function estimatedTWD(card) {
 function walletName(card) { return card.walletId ? (db.wallets.find(w => w.id === card.walletId)?.name || card.card || "未指定") : (card.card || "未指定"); }
 function walletSummary() {
   if (!db.wallets.length) return `<div class="empty" style="margin:10px 0">尚未設定虛擬卡額度。請先點選「管理虛擬卡額度」新增卡片；舊刷卡紀錄仍會保留。</div>`;
-  const cards = db.wallets.map(wallet => {
+  const cards = activeWallets().map(wallet => {
     const used = db.cards.filter(card => card.walletId === wallet.id || (!card.walletId && card.card === wallet.name)).reduce((sum, card) => sum + estimatedTWD(card), 0);
     const limit = Number(wallet.limit) || 0;
     const remain = limit - used;
     const pct = limit > 0 ? Math.min(100, Math.max(0, used / limit * 100)) : 0;
     return `<div class="stat" style="min-width:220px"><div class="row between"><b>${esc(wallet.name)}</b><small>到期：${fmt(wallet.expiry)}</small></div><span>台幣額度</span><strong>NT$ ${money(limit)}</strong><span>已使用（估算）</span><strong>NT$ ${money(used)}</strong><span>剩餘額度</span><strong style="color:${remain < 0 ? '#c0392b' : '#16834a'}">NT$ ${money(remain)}</strong><div style="height:8px;background:#e7ece9;border-radius:20px;overflow:hidden"><div style="height:8px;width:${pct}%;background:${remain < 0 ? '#c0392b' : '#239b62'}"></div></div><small>${pct.toFixed(0)}% 已使用</small><div><button class="linkbtn" data-edit-wallet="${esc(wallet.id)}">編輯額度</button> <button class="linkbtn danger" data-delete-wallet="${esc(wallet.id)}">刪除卡片</button></div></div>`;
   }).join("");
-  const totalLimit = db.wallets.reduce((s,w)=>s+(Number(w.limit)||0),0);
-  const totalUsed = db.wallets.reduce((s,w)=>s+db.cards.filter(c=>c.walletId===w.id || (!c.walletId && c.card===w.name)).reduce((a,c)=>a+estimatedTWD(c),0),0);
-  return `<div class="grid">${cards}<div class="stat"><span>所有虛擬卡合計額度</span><strong>NT$ ${money(totalLimit)}</strong><span>預估已使用</span><strong>NT$ ${money(totalUsed)}</strong><span>預估剩餘</span><strong style="color:#16834a">NT$ ${money(totalLimit-totalUsed)}</strong></div></div>`;
+  const totalLimit = activeWallets().reduce((s,w)=>s+(Number(w.limit)||0),0);
+  const totalUsed = activeWallets().reduce((s,w)=>s+db.cards.filter(c=>c.walletId===w.id || (!c.walletId && c.card===w.name)).reduce((a,c)=>a+estimatedTWD(c),0),0);
+  return `<div class="grid">${cards}<div class="stat"><span>使用中虛擬卡合計額度</span><strong>NT$ ${money(totalLimit)}</strong><span>預估已使用</span><strong>NT$ ${money(totalUsed)}</strong><span>預估剩餘</span><strong style="color:#16834a">NT$ ${money(totalLimit-totalUsed)}</strong></div></div>${expiredWalletSection()}`;
 }
 function cardSummary(list) {
   const twd = list.reduce((sum, card) => sum + estimatedTWD(card), 0);
@@ -362,7 +387,7 @@ function groupForm(group = {}) {
 }
 
 function cardForm(card = {}) {
-  const walletOptions = db.wallets.map(w=>w.name);
+  const walletOptions = db.wallets.filter(w => !walletExpired(w) || w.name === (card.walletId ? db.wallets.find(x => x.id === card.walletId)?.name : card.card)).map(w => w.name);
   const currentWallet = card.walletId ? db.wallets.find(w=>w.id===card.walletId)?.name : (card.card || "");
   const currencyOptions = Object.keys(db.fxRates);
   openModal(`<h2>${card.id ? "編輯" : "新增"}虛擬卡刷卡</h2><form id="cardForm"><div class="formgrid">
@@ -405,7 +430,7 @@ function walletForm(wallet = {}) {
   $("#walletForm").onsubmit=event=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.target));data.limit=Number(data.limit)||0;data.id=wallet.id||uid();db.wallets=db.wallets.filter(w=>w.id!==data.id).concat(data);closeModal();save();};
 }
 function manageWallets() {
-  openModal(`<h2>虛擬卡額度管理</h2><p class="muted">每張卡獨立設定台幣額度及效期；刷卡明細仍共用同一張表。</p><div class="row between"><span>目前 ${db.wallets.length} 張卡</span><button type="button" class="btn" id="newWallet">＋ 新增虛擬卡</button></div><div class="table-wrap"><table><thead><tr><th>卡片</th><th>台幣額度</th><th>開卡日</th><th>到期日</th><th>操作</th></tr></thead><tbody>${db.wallets.map(w=>`<tr><td>${esc(w.name)}</td><td>NT$ ${money(w.limit)}</td><td>${fmt(w.start)}</td><td>${fmt(w.expiry)}</td><td><button class="linkbtn" data-modal-edit-wallet="${esc(w.id)}">編輯</button></td></tr>`).join("")||'<tr><td colspan="5">尚未新增虛擬卡</td></tr>'}</tbody></table></div><div class="modal-actions"><button type="button" class="btn light" id="cancel">關閉</button></div>`);
+  openModal(`<h2>虛擬卡額度管理</h2><p class="muted">每張卡獨立設定台幣額度及效期；刷卡明細仍共用同一張表。</p><div class="row between"><span>目前 ${db.wallets.length} 張卡</span><button type="button" class="btn" id="newWallet">＋ 新增虛擬卡</button></div><div class="table-wrap"><table><thead><tr><th>卡片</th><th>台幣額度</th><th>開卡日</th><th>到期日</th><th>操作</th></tr></thead><tbody>${db.wallets.map(w=>`<tr><td>${esc(w.name)}${walletExpired(w) ? ' <small class="muted">（已過期）</small>' : ""}</td><td>NT$ ${money(w.limit)}</td><td>${fmt(w.start)}</td><td>${fmt(w.expiry)}</td><td><button class="linkbtn" data-modal-edit-wallet="${esc(w.id)}">編輯</button></td></tr>`).join("")||'<tr><td colspan="5">尚未新增虛擬卡</td></tr>'}</tbody></table></div><div class="modal-actions"><button type="button" class="btn light" id="cancel">關閉</button></div>`);
   $("#cancel").onclick=closeModal;
   $("#newWallet").onclick=()=>walletForm();
   document.querySelectorAll("[data-modal-edit-wallet]").forEach(btn=>btn.addEventListener("click",e=>{const w=db.wallets.find(x=>x.id===e.currentTarget.dataset.modalEditWallet);if(w)walletForm(w);}));
@@ -564,9 +589,9 @@ $("#content")?.addEventListener("input", event => {
     const rows = $("#groupRows");
     if (rows) rows.innerHTML = groupTable(list);
   }
-  if (event.target.id === "cardSearch") {
-    const q = event.target.value.trim().toLowerCase();
-    const list = db.cards.filter(card => [card.group, card.merchant, card.purpose, card.card, walletName(card), card.note].join(" ").toLowerCase().includes(q));
+  if (event.target.id === "cardSearch" || event.target.id === "cardScope") {
+    const q = ($("#cardSearch")?.value || "").trim().toLowerCase(); cardScope = $("#cardScope")?.value || "active";
+    const list = cardsInScope().filter(card => [card.group, card.merchant, card.purpose, card.card, walletName(card), card.note].join(" ").toLowerCase().includes(q));
     const summary = $("#cardSummary"), rows = $("#cardRows");
     if (summary) summary.innerHTML = cardSummary(list);
     if (rows) rows.innerHTML = cardTable(list);
