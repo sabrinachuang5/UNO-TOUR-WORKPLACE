@@ -130,11 +130,11 @@ function cardWallet(card) {
   return card.walletId ? db.wallets.find(w => w.id === card.walletId) : db.wallets.find(w => w.name === card.card);
 }
 function cardsInScope() {
-  if (cardScope === "all") return db.cards;
+  if (cardScope === "all") return onlyUnbilled ? db.cards.filter(c => !c.billed) : db.cards;
   return db.cards.filter(card => {
     const w = cardWallet(card);
     const expired = Boolean(w) && walletExpired(w);
-    return cardScope === "expired" ? expired : !expired;
+    return (cardScope === "expired" ? expired : !expired) && (!onlyUnbilled || !card.billed);
   });
 }
 function cardScopeSelect() {
@@ -146,6 +146,13 @@ function expiredWalletSection() {
   if (!list.length) return "";
   const rows = list.map(w => `<tr><td>${esc(w.name)}</td><td>${esc(w.expiry)}</td><td>NT$ ${money(w.limit)}</td><td>NT$ ${money(walletUsed(w))}</td><td><button class="linkbtn" data-edit-wallet="${esc(w.id)}">編輯</button> <button class="linkbtn danger" data-delete-wallet="${esc(w.id)}">刪除卡片</button></td></tr>`).join("");
   return `<details style="margin-top:12px"><summary style="cursor:pointer"><b>已過期的卡（${list.length}）</b></summary><div class="table-wrap"><table><thead><tr><th>卡片</th><th>到期日</th><th>台幣額度</th><th>已使用（估算）</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div></details>`;
+}
+let onlyUnbilled = false;
+function unbilledPanel() {
+  const list = db.cards.filter(c => !c.billed).sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  if (!list.length) return "";
+  const rows = list.slice(0, 8).map(card => `<tr><td><input type="checkbox" aria-label="已打請款單" data-billed-card="${esc(card.id)}"></td><td>${esc(card.group)}</td><td>${fmt(card.date)}</td><td>${esc(card.merchant || card.purpose)}</td><td>NT$ ${money(estimatedTWD(card))}</td></tr>`).join("");
+  return `<div class="panel"><div class="row between"><h2>待打請款單（${list.length} 筆）</h2><div class="row"><button class="btn light" data-go="cards">前往記帳</button><button class="btn light" id="billAll">全部標為已打</button></div></div><div class="table-wrap"><table><thead><tr><th>已打</th><th>團號</th><th>刷卡日</th><th>項目／商家</th><th>台幣估算</th></tr></thead><tbody>${rows}</tbody></table></div>${list.length > 8 ? `<p class="muted">只列出最早的 8 筆，其餘請到「虛擬卡記帳」查看。</p>` : ""}</div>`;
 }
 function pageTitle(page) {
   return ({
@@ -188,6 +195,7 @@ function render() {
         <div class="stat"><span>逾期項目</span><strong class="due">${overdue}</strong></div>
         <div class="stat"><span>虛擬卡紀錄</span><strong>${db.cards.length}</strong></div>
       </div>
+      ${unbilledPanel()}
       ${walletAlertPanel()}
       <div class="panel"><div class="row between"><h2>逾期與近期 Deadline</h2><button class="btn light" data-go="deadlines">查看全部</button></div>${deadlineTable(upcoming)}</div>
       <div class="panel"><div class="row between"><h2>近期出發團體</h2><button class="btn light" data-go="groups">團體總表</button></div>${groupTable([...activeGroups].sort((a, b) => (a.depart || "").localeCompare(b.depart || "")).slice(0, 8))}</div>`;
@@ -217,7 +225,7 @@ function render() {
     content.innerHTML = `<div class="panel"><div class="row between"><h2>虛擬卡刷卡紀錄</h2><div class="row"><button class="btn light" id="manageWallets">管理虛擬卡額度</button><button class="btn" id="addCard">＋ 新增刷卡</button></div></div>
       <div class="panel" style="margin:12px 0;padding:14px;background:#f8faf9"><div class="row between"><b>參考匯率（約 NT$）</b><div class="row"><small class="muted">${db.fxUpdatedAt ? `最後更新：${esc(db.fxUpdatedAt)}` : "尚未更新，使用預設值"}</small><button class="btn light" id="refreshRates">更新匯率</button><button class="btn light" id="editRates">設定匯率</button></div></div><div class="grid">${Object.entries(db.fxRates).map(([c,r])=>`<div class="stat"><span>${esc(c)}</span><strong>NT$ ${Number(r).toLocaleString("en-US",{maximumFractionDigits:4})}</strong></div>`).join("")}</div><p class="muted">匯率為外部參考資料估算，非 Google 官方報價或銀行實際扣款；可手動調整。</p></div>
       <div id="walletSummary">${walletSummary()}</div>
-      <div class="toolbar"><input id="cardSearch" placeholder="搜尋團號／項目／商家／卡片">${cardScopeSelect()}</div><div id="cardSummary">${cardSummary(cardsInScope())}</div><div id="cardRows">${cardTable(cardsInScope())}</div></div>`;
+      <div class="toolbar"><input id="cardSearch" placeholder="搜尋團號／項目／商家／卡片">${cardScopeSelect()}<label><input type="checkbox" id="onlyUnbilled" ${onlyUnbilled ? "checked" : ""}> 只看未打請款單</label></div><div id="cardSummary">${cardSummary(cardsInScope())}</div><div id="cardRows">${cardTable(cardsInScope())}</div></div>`;
   }
 
   if (view === "remits") {
@@ -295,12 +303,12 @@ function cardSummary(list) {
   const currencies = {};
   list.forEach(card => { const currency = card.currency || "未填幣別"; currencies[currency] = (currencies[currency] || 0) + (Number(card.amount) || 0); });
   const foreign = Object.entries(currencies).map(([currency, amount]) => `${esc(currency)} ${money(amount)}`).join(" ／ ") || "—";
-  return `<div class="grid"><div class="stat"><span>刷卡筆數</span><strong>${list.length}</strong></div><div class="stat"><span>台幣預估金額</span><strong>NT$ ${money(twd)}</strong></div><div class="stat"><span>原幣金額（依幣別分開）</span><strong style="font-size:1rem">${foreign}</strong></div></div>`;
+  return `<div class="grid"><div class="stat"><span>刷卡筆數</span><strong>${list.length}</strong></div><div class="stat"><span>未打請款單</span><strong class="${list.some(c => !c.billed) ? "due" : ""}">${list.filter(c => !c.billed).length}</strong></div><div class="stat"><span>台幣預估金額</span><strong>NT$ ${money(twd)}</strong></div><div class="stat"><span>原幣金額（依幣別分開）</span><strong style="font-size:1rem">${foreign}</strong></div></div>`;
 }
 function cardTable(list = db.cards) {
   if (!list.length) return '<div class="empty">沒有符合的刷卡紀錄。</div>';
-  return `<div class="table-wrap"><table><thead><tr><th>團號</th><th>刷卡日</th><th>項目／商家</th><th>金額</th><th>幣別</th><th>匯率</th><th>台幣估算</th><th>虛擬卡</th><th>操作</th></tr></thead><tbody>
-    ${list.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(card => `<tr><td>${esc(card.group)}</td><td>${fmt(card.date)}</td><td>${esc(card.merchant || card.purpose)}</td><td>${money(card.amount)}</td><td>${esc(card.currency)}</td><td>${rateUsed(card)}</td><td>NT$ ${money(estimatedTWD(card))}${Number(card.actualTwd) > 0 ? " <small>(實際)</small>" : ""}</td><td>${esc(walletName(card))}</td><td><button class="linkbtn" data-edit-card="${esc(card.id)}">編輯</button> <button class="linkbtn danger" data-delete-card="${esc(card.id)}">刪除</button></td></tr>`).join("")}
+  return `<div class="table-wrap"><table><thead><tr><th>團號</th><th>刷卡日</th><th>項目／商家</th><th>金額</th><th>幣別</th><th>匯率</th><th>台幣估算</th><th>虛擬卡</th><th>請款單</th><th>操作</th></tr></thead><tbody>
+    ${list.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map(card => `<tr${card.billed ? "" : ' style="background:#fff8ec"'}><td>${esc(card.group)}</td><td>${fmt(card.date)}</td><td>${esc(card.merchant || card.purpose)}</td><td>${money(card.amount)}</td><td>${esc(card.currency)}</td><td>${rateUsed(card)}</td><td>NT$ ${money(estimatedTWD(card))}${Number(card.actualTwd) > 0 ? " <small>(實際)</small>" : ""}</td><td>${esc(walletName(card))}</td><td><input type="checkbox" aria-label="已打請款單" data-billed-card="${esc(card.id)}" ${card.billed ? "checked" : ""}></td><td><button class="linkbtn" data-edit-card="${esc(card.id)}">編輯</button> <button class="linkbtn danger" data-delete-card="${esc(card.id)}">刪除</button></td></tr>`).join("")}
     </tbody></table></div>`;
 }
 function remitTable(list = db.remits) {
@@ -398,6 +406,7 @@ function cardForm(card = {}) {
     ${field("幣別", "currency", card.currency || "EUR", true, "select", currencyOptions)}
     ${field("使用虛擬卡", "walletName", currentWallet, true, "select", walletOptions.length ? walletOptions : ["請先新增虛擬卡"])}
     ${field("實際台幣金額（選填，有帳單時填寫）", "actualTwd", card.actualTwd || "", false, "number")}
+    <label class="field">請款單<span><input type="checkbox" name="billed" value="1" ${card.billed ? "checked" : ""}> 已打請款單</span></label>
     <label class="field full">備註<textarea name="note" rows="3">${esc(card.note || "")}</textarea></label>
   </div><p class="muted">每筆刷卡會記住儲存當下的匯率，之後更新匯率不會改動舊紀錄。有銀行帳單的實際台幣金額時，填在「實際台幣金額」，就會以實際金額為準。</p><div class="modal-actions"><button type="button" class="btn light" id="cancel">取消</button><button class="btn">儲存</button></div></form>`);
   $("#cancel").onclick = closeModal;
@@ -413,6 +422,8 @@ function cardForm(card = {}) {
       : 0;
     data.rate = keptRate || rateFor(data.currency);
     data.actualTwd = Number(data.actualTwd) || 0;
+    data.billed = data.billed === "1";
+    data.billedAt = data.billed ? (card.billedAt || today()) : "";
     data.twd = estimatedTWD(data).toFixed(2);
     data.id = card.id || uid();
     db.cards = db.cards.filter(item => item.id !== data.id).concat(data);
@@ -544,6 +555,10 @@ $("#content")?.addEventListener("click", async event => {
   if (target.id === "editRates") rateForm();
   if (target.id === "refreshRates") refreshRates();
   if (target.id === "export") exportBackup();
+  if (target.id === "billAll" && confirm("確定要把目前所有「未打請款單」的刷卡紀錄，全部標為已打嗎？\n（只適合第一次升級後，舊紀錄其實都已經打過單的時候使用）")) {
+    db.cards.forEach(c => { if (!c.billed) { c.billed = true; c.billedAt = today(); } });
+    save();
+  }
   if (target.dataset.go) go(target.dataset.go);
 
   if (target.dataset.editGroup) {
@@ -589,8 +604,8 @@ $("#content")?.addEventListener("input", event => {
     const rows = $("#groupRows");
     if (rows) rows.innerHTML = groupTable(list);
   }
-  if (event.target.id === "cardSearch" || event.target.id === "cardScope") {
-    const q = ($("#cardSearch")?.value || "").trim().toLowerCase(); cardScope = $("#cardScope")?.value || "active";
+  if (event.target.id === "cardSearch" || event.target.id === "cardScope" || event.target.id === "onlyUnbilled") {
+    const q = ($("#cardSearch")?.value || "").trim().toLowerCase(); cardScope = $("#cardScope")?.value || "active"; onlyUnbilled = Boolean($("#onlyUnbilled")?.checked);
     const list = cardsInScope().filter(card => [card.group, card.merchant, card.purpose, card.card, walletName(card), card.note].join(" ").toLowerCase().includes(q));
     const summary = $("#cardSummary"), rows = $("#cardRows");
     if (summary) summary.innerHTML = cardSummary(list);
@@ -606,6 +621,12 @@ $("#content")?.addEventListener("input", event => {
 
 $("#content")?.addEventListener("change", event => {
   if (event.target.id === "hideDone") { hideDone = event.target.checked; render(); return; }
+  const billedBox = event.target.closest("[data-billed-card]");
+  if (billedBox) {
+    const billedCard = db.cards.find(item => item.id === billedBox.dataset.billedCard);
+    if (billedCard) { billedCard.billed = billedBox.checked; billedCard.billedAt = billedBox.checked ? today() : ""; save(); }
+    return;
+  }
   const deadlineCheckbox = event.target.closest("[data-deadline-group][data-deadline-key]");
   if (deadlineCheckbox) {
     const group = db.groups.find(item => item.id === deadlineCheckbox.dataset.deadlineGroup);
