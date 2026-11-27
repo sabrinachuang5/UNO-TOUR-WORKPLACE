@@ -256,11 +256,18 @@ async function gWrite() {
       const meta = await (await gApi(`${G_API}/files/${gFileId}?fields=modifiedTime`)).json();
       if (gModified && meta.modifiedTime !== gModified) { gBusy = false; await gSync(); return; }
     }
+    if (!gHasData(db) && gFileId) {
+      try {
+        const cur = JSON.parse((await (await gApi(`${G_API}/files/${gFileId}?alt=media`)).text()) || "null");
+        if (gHasData(cur)) { gStatus = "這個瀏覽器目前沒有資料，為了保護雲端檔案，已停止覆蓋"; gBusy = false; gShow(); return; }
+      } catch (e) { if (e.message === "need-login") throw e; }
+    }
     if (!db.updatedAt) { db.updatedAt = new Date().toISOString(); lsSet(KEY, JSON.stringify(db)); }
     await gUpload(JSON.stringify(db, null, 2));
     lsSet(G_SYNC, db.updatedAt);
     if (db.lastBackupAt !== today()) { db.lastBackupAt = today(); lsSet(KEY, JSON.stringify(db)); }
     gStatus = `已同步（${nowLabel()}）`;
+    gDailyBackup();
   } catch (e) { gFail(e); }
   gBusy = false;
   gShow();
@@ -284,19 +291,106 @@ async function gSync() {
     const hasLocal = [db.groups, db.cards, db.remits, db.wallets, db.tools].some(list => list.length);
     const remoteChanged = !remoteAt || remoteAt > synced;
     const localChanged = hasLocal && (!localAt || localAt > synced);
-    if (!remoteChanged && !localChanged) { gStatus = `已連線（${nowLabel()}）`; gBusy = false; gShow(); return; }
+    if (!remoteChanged && !localChanged) { gStatus = `已連線（${nowLabel()}）`; gDailyBackup(); gBusy = false; gShow(); return; }
     let useRemote = remoteChanged;
     if (remoteChanged && localChanged && remoteAt !== localAt) {
-      useRemote = confirm("雲端檔案和這個瀏覽器裡的資料，都各自有新的內容。\n\n按「確定」：以雲端檔案為準（會取代這個瀏覽器的資料）\n按「取消」：以這個瀏覽器為準（會覆蓋雲端檔案）\n\n不確定的話，請先按取消，再到「資料備份」匯出一份備份。");
+      const choice = await gChoose(remote);
+      if (choice === "skip") { gStatus = "已暫停同步（尚未選擇要用哪一邊的資料）"; gBusy = false; gShow(); return; }
+      const kept = choice === "remote"
+        ? await gKeepCopy(JSON.stringify(db, null, 2), "被取代的瀏覽器資料")
+        : await gKeepCopy(text, "被覆蓋的雲端資料");
+      if (!kept) { gStatus = "無法先備份被取代的那一份，已暫停同步"; gBusy = false; gShow(); return; }
+      useRemote = choice === "remote";
+    }
+    if (false) {
+      useRemote = remoteChanged;
     }
     if (useRemote) {
       db = normalizeDB(remote);
       lsSet(KEY, JSON.stringify(db)); lsSet(G_SYNC, db.updatedAt || "");
-      gStatus = `已讀取雲端資料（${nowLabel()}）`;
+      gStatus = `已讀取雲端資料（${nowLabel()}）`; gDailyBackup();
       gBusy = false; render(); return;
     }
     gBusy = false; await gWrite();
   } catch (e) { gFail(e); gBusy = false; gShow(); }
+}
+const G_BK = KEY + "-gbackup", G_BK_KEEP = 30, G_BK_FOLDER = "UNO TOUR 備份", G_BK_PREFIX = "uno-tour-backup-";
+let gBackupBusy = false;
+async function gBackupFolder() {
+  const params = new URLSearchParams({ q: `name='${G_BK_FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`, pageSize: "1", fields: "files(id)" });
+  const found = (await (await gApi(`${G_API}/files?${params}`)).json()).files || [];
+  if (found.length) return found[0].id;
+  const made = await (await gApi(`${G_API}/files?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: G_BK_FOLDER, mimeType: "application/vnd.google-apps.folder" }) })).json();
+  return made.id;
+}
+async function gDailyBackup(force) {
+  if (!gLinked || gBackupBusy) return false;
+  if (!gHasData(db)) return false;
+  if (!force && lsGet(G_BK) === today()) return true;
+  gBackupBusy = true;
+  try {
+    const folder = await gBackupFolder();
+    const name = `${G_BK_PREFIX}${today()}.json`;
+    const content = JSON.stringify(db, null, 2);
+    const same = new URLSearchParams({ q: `'${folder}' in parents and name='${name}' and trashed=false`, pageSize: "1", fields: "files(id)" });
+    const existing = (await (await gApi(`${G_API}/files?${same}`)).json()).files || [];
+    if (existing.length && !force) {
+      lsSet(G_BK, today());
+      gBackupBusy = false;
+      return true;
+    }
+    if (existing.length) {
+      await gApi(`${G_UP}/files/${existing[0].id}?uploadType=media`, { method: "PATCH", headers: { "Content-Type": "application/json; charset=UTF-8" }, body: content });
+    } else {
+      const boundary = "bk" + Date.now();
+      const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, mimeType: "application/json", parents: [folder] })}\r\n--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${content}\r\n--${boundary}--`;
+      await gApi(`${G_UP}/files?uploadType=multipart&fields=id`, { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body });
+    }
+    lsSet(G_BK, today());
+    const all = new URLSearchParams({ q: `'${folder}' in parents and trashed=false`, orderBy: "name desc", pageSize: "200", fields: "files(id,name)" });
+    const list = ((await (await gApi(`${G_API}/files?${all}`)).json()).files || []).filter(f => f.name.startsWith(G_BK_PREFIX));
+    for (const old of list.slice(G_BK_KEEP)) {
+      await gApi(`${G_API}/files/${old.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trashed: true }) });
+    }
+    const info = $("#gBackupInfo");
+    if (info) info.textContent = today();
+    gBackupBusy = false;
+    return true;
+  } catch (e) {
+    gBackupBusy = false;
+    return false;
+  }
+}
+async function gBackupNow() {
+  if (!gLinked || !gToken || Date.now() > gExpires) { alert("請先登入 Google（按「重新連線／立即同步」）。"); return; }
+  if (!gHasData(db)) { alert("目前沒有資料，不需要備份。"); return; }
+  const ok = await gDailyBackup(true);
+  alert(ok ? "已備份到你雲端硬碟的「" + G_BK_FOLDER + "」資料夾。" : "備份失敗，請稍後再試。");
+}
+const gHasData = d => Boolean(d) && [d.groups, d.cards, d.remits, d.wallets, d.tools].some(list => Array.isArray(list) && list.length);
+const gCount = d => `團體 ${(d.groups || []).length}、刷卡 ${(d.cards || []).length}、匯款 ${(d.remits || []).length}、虛擬卡 ${(d.wallets || []).length}`;
+const gTimeLabel = iso => iso ? new Date(iso).toLocaleString("zh-TW", { hour12: false }) : "（沒有記錄）";
+async function gKeepCopy(content, label) {
+  try {
+    const folder = await gBackupFolder();
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+    const name = `uno-tour-${label}-${stamp}.json`;
+    const boundary = "kc" + Date.now();
+    const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, mimeType: "application/json", parents: [folder] })}\r\n--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${content}\r\n--${boundary}--`;
+    await gApi(`${G_UP}/files?uploadType=multipart&fields=id`, { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body });
+    return true;
+  } catch (e) { return false; }
+}
+function gChoose(remote) {
+  return new Promise(resolve => {
+    const onKey = e => { if (e.key === "Escape") done("skip"); };
+    const done = value => { document.removeEventListener("keydown", onKey); closeModal(); resolve(value); };
+    document.addEventListener("keydown", onKey);
+    openModal(`<h2>雲端和這個瀏覽器的資料不一樣</h2><p class="muted">請看清楚兩邊的內容，再選要用哪一邊。被取代的那一份，會先另外存一份到雲端硬碟的「UNO TOUR 備份」資料夾，選錯也找得回來。</p><div class="grid"><div class="stat"><span>☁ 雲端檔案</span><strong style="font-size:1rem">${esc(gCount(remote))}</strong><small>最後更新：${esc(gTimeLabel(remote.updatedAt))}</small></div><div class="stat"><span>🖥 這個瀏覽器</span><strong style="font-size:1rem">${esc(gCount(db))}</strong><small>最後更新：${esc(gTimeLabel(db.updatedAt))}</small></div></div><div class="modal-actions" style="flex-wrap:wrap"><button type="button" class="btn light" id="gcSkip">先不要同步</button><button type="button" class="btn light" id="gcLocal">用這個瀏覽器的（會覆蓋雲端）</button><button type="button" class="btn" id="gcRemote">用雲端的（建議）</button></div>`);
+    $("#gcSkip").onclick = () => done("skip");
+    $("#gcLocal").onclick = () => done("local");
+    $("#gcRemote").onclick = () => done("remote");
+  });
 }
 async function gConnect() {
   try {
@@ -325,9 +419,9 @@ function gBanner() {
 }
 function gPanel() {
   const buttons = gLinked
-    ? `<button class="btn light" id="gConnect">重新連線／立即同步</button><button class="btn light" id="gUnlink">取消連結</button>`
+    ? `<button class="btn light" id="gConnect">重新連線／立即同步</button><button class="btn light" id="gBackupNow">立即備份一份</button><button class="btn light" id="gUnlink">取消連結</button>`
     : `<button class="btn" id="gConnect">用 Google 登入並開始同步</button>`;
-  return `<div class="panel"><h2>自動同步到 Google Drive</h2><p>用 Google 帳號登入後，資料會自動存進你雲端硬碟裡的「${G_FILE}」。在任何裝置登入同一個帳號，就能讀到同一份資料。網站只能讀寫它自己建立的這個檔案，碰不到你其他的檔案。</p><p><b>狀態：</b><span id="gStatus">${gLinked ? esc(gStatus) : "尚未連結"}</span></p><div class="row">${buttons}</div><p class="muted">取消連結不會刪除雲端檔案。若登入時看到「Google 尚未驗證這個應用程式」，請按「進階」→「前往 UNO TOUR」。</p></div>`;
+  return `<div class="panel"><h2>自動同步到 Google Drive</h2><p>用 Google 帳號登入後，資料會自動存進你雲端硬碟裡的「${G_FILE}」。在任何裝置登入同一個帳號，就能讀到同一份資料。網站只能讀寫它自己建立的這個檔案，碰不到你其他的檔案。</p><p><b>狀態：</b><span id="gStatus">${gLinked ? esc(gStatus) : "尚未連結"}</span></p><p><b>自動備份：</b>每天第一次同步時存一份，保留最近 30 份，放在雲端硬碟的「UNO TOUR 備份」資料夾。<br>最近一次：<span id="gBackupInfo">${lsGet(G_BK) || "尚未備份"}</span></p><div class="row">${buttons}</div><p class="muted">取消連結不會刪除雲端檔案。若登入時看到「Google 尚未驗證這個應用程式」，請按「進階」→「前往 UNO TOUR」。</p></div>`;
 }
 function pageTitle(page) {
   return ({
@@ -733,6 +827,7 @@ $("#content")?.addEventListener("click", async event => {
   if (target.id === "export") exportBackup();
   if (target.id === "gConnect") gConnect();
   if (target.id === "gUnlink") gUnlink();
+  if (target.id === "gBackupNow") gBackupNow();
   if (target.id === "billAll" && confirm("確定要把目前所有「未打請款單」的刷卡紀錄，全部標為已打嗎？\n（只適合第一次升級後，舊紀錄其實都已經打過單的時候使用）")) {
     db.cards.forEach(c => { if (!c.billed) { c.billed = true; c.billedAt = today(); } });
     save();
