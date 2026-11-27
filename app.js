@@ -40,6 +40,7 @@ function loadDB() {
       fxRates: saved.fxRates && typeof saved.fxRates === "object" ? saved.fxRates : { EUR: 37, NOK: 3.5, SEK: 3.3, DKK: 4.9, ISK: 0.27 },
       fxUpdatedAt: saved.fxUpdatedAt || "",
       lastBackupAt: saved.lastBackupAt || "",
+      updatedAt: saved.updatedAt || "",
       tools: Array.isArray(saved.tools) ? saved.tools.map(item => ({ ...item, id: item.id || uid() })) : []
     };
   } catch {
@@ -61,6 +62,8 @@ window.addEventListener("hashchange", () => {
 });
 
 function save() {
+  gQueue();
+  db.updatedAt = new Date().toISOString();
   try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (error) { alert("資料無法儲存到瀏覽器（可能是儲存空間已滿、或使用無痕模式）。請立刻匯出備份。\n" + error.message); }
   render();
 }
@@ -154,6 +157,178 @@ function unbilledPanel() {
   const rows = list.slice(0, 8).map(card => `<tr><td><input type="checkbox" aria-label="已打請款單" data-billed-card="${esc(card.id)}"></td><td>${esc(card.group)}</td><td>${fmt(card.date)}</td><td>${esc(card.merchant || card.purpose)}</td><td>NT$ ${money(estimatedTWD(card))}</td></tr>`).join("");
   return `<div class="panel"><div class="row between"><h2>待打請款單（${list.length} 筆）</h2><div class="row"><button class="btn light" data-go="cards">前往記帳</button><button class="btn light" id="billAll">全部標為已打</button></div></div><div class="table-wrap"><table><thead><tr><th>已打</th><th>團號</th><th>刷卡日</th><th>項目／商家</th><th>台幣估算</th></tr></thead><tbody>${rows}</tbody></table></div>${list.length > 8 ? `<p class="muted">只列出最早的 8 筆，其餘請到「虛擬卡記帳」查看。</p>` : ""}</div>`;
 }
+const G_CLIENT_ID = "682289344955-4hvo0ahos44rglcchiil3me84evbhku2.apps.googleusercontent.com";
+const G_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const G_FILE = "uno-tour-data.json";
+const G_API = "https://www.googleapis.com/drive/v3";
+const G_UP = "https://www.googleapis.com/upload/drive/v3";
+const G_FLAG = KEY + "-gdrive", G_SYNC = KEY + "-gsynced", G_FILEID = KEY + "-gfileid";
+const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+const nowLabel = () => new Date().toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" });
+let gLinked = lsGet(G_FLAG) === "1", gToken = "", gExpires = 0, gNeedsLogin = false;
+let gFileId = lsGet(G_FILEID) || "", gModified = "", gStatus = "未連結", gTimer = null, gBusy = false, gDirty = false;
+
+function normalizeDB(s) {
+  const withId = list => Array.isArray(list) ? list.map(item => ({ ...item, id: item.id || uid() })) : [];
+  return {
+    groups: withId(s.groups).map(g => ({ ...g, deadlineDone: g.deadlineDone && typeof g.deadlineDone === "object" ? g.deadlineDone : {} })),
+    cards: withId(s.cards), remits: withId(s.remits), wallets: withId(s.wallets), tools: withId(s.tools),
+    fxRates: s.fxRates && typeof s.fxRates === "object" ? s.fxRates : { EUR: 37, NOK: 3.5, SEK: 3.3, DKK: 4.9, ISK: 0.27 },
+    fxUpdatedAt: s.fxUpdatedAt || "", lastBackupAt: s.lastBackupAt || "", updatedAt: s.updatedAt || ""
+  };
+}
+function gLoadScript() {
+  return new Promise((resolve, reject) => {
+    if (window.google?.accounts?.oauth2) return resolve();
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client"; s.async = true;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("無法載入 Google 登入元件，請確認網路連線"));
+    document.head.appendChild(s);
+  });
+}
+async function gLogin() {
+  await gLoadScript();
+  return new Promise((resolve, reject) => {
+    google.accounts.oauth2.initTokenClient({
+      client_id: G_CLIENT_ID, scope: G_SCOPE,
+      callback: resp => {
+        if (resp.error) return reject(new Error(resp.error_description || resp.error));
+        gToken = resp.access_token;
+        gExpires = Date.now() + (Number(resp.expires_in || 3600) - 60) * 1000;
+        gNeedsLogin = false;
+        resolve();
+      },
+      error_callback: err => reject(new Error(err.type === "popup_closed" ? "登入視窗被關閉了" : (err.message || err.type || "登入失敗")))
+    }).requestAccessToken();
+  });
+}
+async function gApi(url, options = {}) {
+  if (!gToken || Date.now() > gExpires) { gNeedsLogin = true; throw new Error("need-login"); }
+  const res = await fetch(url, { ...options, headers: { Authorization: "Bearer " + gToken, ...(options.headers || {}) } });
+  if (res.status === 401) { gNeedsLogin = true; throw new Error("need-login"); }
+  if (!res.ok) throw new Error("Google 回應錯誤 " + res.status);
+  return res;
+}
+function gFail(e) {
+  if (e.message === "need-login") gStatus = "需要重新登入 Google";
+  else gStatus = "同步失敗：" + e.message;
+}
+function gShow() {
+  const el = $("#gStatus");
+  if (el) el.textContent = gLinked ? gStatus : "尚未連結";
+}
+async function gFindFile() {
+  if (gFileId) {
+    try {
+      const m = await (await gApi(`${G_API}/files/${gFileId}?fields=modifiedTime,trashed`)).json();
+      if (!m.trashed) { gModified = m.modifiedTime; return; }
+    } catch (e) { if (e.message === "need-login") throw e; }
+    gFileId = ""; lsSet(G_FILEID, "");
+  }
+  const params = new URLSearchParams({ q: `name='${G_FILE}' and trashed=false`, orderBy: "modifiedTime desc", pageSize: "1", fields: "files(id,modifiedTime)" });
+  const found = (await (await gApi(`${G_API}/files?${params}`)).json()).files || [];
+  if (found.length) { gFileId = found[0].id; gModified = found[0].modifiedTime; lsSet(G_FILEID, gFileId); }
+}
+async function gUpload(content) {
+  if (!gFileId) {
+    const boundary = "uno" + Date.now();
+    const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name: G_FILE, mimeType: "application/json" })}\r\n--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${content}\r\n--${boundary}--`;
+    const meta = await (await gApi(`${G_UP}/files?uploadType=multipart&fields=id,modifiedTime`, { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body })).json();
+    gFileId = meta.id; gModified = meta.modifiedTime; lsSet(G_FILEID, gFileId);
+  } else {
+    const meta = await (await gApi(`${G_UP}/files/${gFileId}?uploadType=media&fields=modifiedTime`, { method: "PATCH", headers: { "Content-Type": "application/json; charset=UTF-8" }, body: content })).json();
+    gModified = meta.modifiedTime;
+  }
+}
+function gQueue() {
+  if (!gLinked) return;
+  if (!gToken || Date.now() > gExpires) { gNeedsLogin = true; gStatus = "需要重新登入 Google（資料已先存在這個瀏覽器）"; return; }
+  clearTimeout(gTimer);
+  gTimer = setTimeout(gWrite, 800);
+}
+async function gWrite() {
+  if (gBusy) { gDirty = true; return; }
+  gBusy = true;
+  try {
+    if (gFileId) {
+      const meta = await (await gApi(`${G_API}/files/${gFileId}?fields=modifiedTime`)).json();
+      if (gModified && meta.modifiedTime !== gModified) { gBusy = false; await gSync(); return; }
+    }
+    if (!db.updatedAt) { db.updatedAt = new Date().toISOString(); lsSet(KEY, JSON.stringify(db)); }
+    await gUpload(JSON.stringify(db, null, 2));
+    lsSet(G_SYNC, db.updatedAt);
+    if (db.lastBackupAt !== today()) { db.lastBackupAt = today(); lsSet(KEY, JSON.stringify(db)); }
+    gStatus = `已同步（${nowLabel()}）`;
+  } catch (e) { gFail(e); }
+  gBusy = false;
+  gShow();
+  if (gDirty) { gDirty = false; gQueue(); }
+}
+async function gSync() {
+  gBusy = true;
+  try {
+    await gFindFile();
+    let remote = null, text = "";
+    if (gFileId) {
+      text = await (await gApi(`${G_API}/files/${gFileId}?alt=media`)).text();
+      if (text.trim()) {
+        try { remote = JSON.parse(text); } catch (e) { remote = null; }
+        if (!remote || !Array.isArray(remote.groups)) { gStatus = "雲端檔案內容不正確，已停止同步（不會覆蓋它）"; gBusy = false; gShow(); return; }
+      }
+    }
+    if (!remote) { gBusy = false; await gWrite(); return; }
+    const synced = lsGet(G_SYNC) || "";
+    const localAt = db.updatedAt || "", remoteAt = remote.updatedAt || "";
+    const hasLocal = [db.groups, db.cards, db.remits, db.wallets, db.tools].some(list => list.length);
+    const remoteChanged = !remoteAt || remoteAt > synced;
+    const localChanged = hasLocal && (!localAt || localAt > synced);
+    if (!remoteChanged && !localChanged) { gStatus = `已連線（${nowLabel()}）`; gBusy = false; gShow(); return; }
+    let useRemote = remoteChanged;
+    if (remoteChanged && localChanged && remoteAt !== localAt) {
+      useRemote = confirm("雲端檔案和這個瀏覽器裡的資料，都各自有新的內容。\n\n按「確定」：以雲端檔案為準（會取代這個瀏覽器的資料）\n按「取消」：以這個瀏覽器為準（會覆蓋雲端檔案）\n\n不確定的話，請先按取消，再到「資料備份」匯出一份備份。");
+    }
+    if (useRemote) {
+      db = normalizeDB(remote);
+      lsSet(KEY, JSON.stringify(db)); lsSet(G_SYNC, db.updatedAt || "");
+      gStatus = `已讀取雲端資料（${nowLabel()}）`;
+      gBusy = false; render(); return;
+    }
+    gBusy = false; await gWrite();
+  } catch (e) { gFail(e); gBusy = false; gShow(); }
+}
+async function gConnect() {
+  try {
+    await gLogin();
+    lsSet(G_FLAG, "1"); gLinked = true;
+    gStatus = "同步中…"; render();
+    await gSync();
+  } catch (e) {
+    gStatus = "尚未登入";
+    alert("無法連線 Google：" + e.message);
+  }
+  render();
+}
+function gUnlink() {
+  if (!confirm("取消連結後，網站不再自動同步。雲端上的檔案不會被刪除。確定嗎？")) return;
+  gLinked = false; gToken = ""; gNeedsLogin = false; gStatus = "未連結"; lsSet(G_FLAG, "0");
+  render();
+}
+function gInit() {
+  gLoadScript().catch(() => {});
+  if (gLinked) { gNeedsLogin = true; gStatus = "需要登入 Google（點一下「登入並同步」）"; }
+}
+function gBanner() {
+  if (!gLinked || !gNeedsLogin) return "";
+  return `<div class="panel" style="background:#fff4e5;border:1px solid #f0c27a"><div class="row between"><b>⚠ Google Drive 同步需要登入（${esc(gStatus)}）</b><button class="btn light" id="gConnect">登入並同步</button></div></div>`;
+}
+function gPanel() {
+  const buttons = gLinked
+    ? `<button class="btn light" id="gConnect">重新連線／立即同步</button><button class="btn light" id="gUnlink">取消連結</button>`
+    : `<button class="btn" id="gConnect">用 Google 登入並開始同步</button>`;
+  return `<div class="panel"><h2>自動同步到 Google Drive</h2><p>用 Google 帳號登入後，資料會自動存進你雲端硬碟裡的「${G_FILE}」。在任何裝置登入同一個帳號，就能讀到同一份資料。網站只能讀寫它自己建立的這個檔案，碰不到你其他的檔案。</p><p><b>狀態：</b><span id="gStatus">${gLinked ? esc(gStatus) : "尚未連結"}</span></p><div class="row">${buttons}</div><p class="muted">取消連結不會刪除雲端檔案。若登入時看到「Google 尚未驗證這個應用程式」，請按「進階」→「前往 UNO TOUR」。</p></div>`;
+}
 function pageTitle(page) {
   return ({
     dashboard: "工作總覽", groups: "團體總表", deadlines: "Deadline 管理",
@@ -169,7 +344,7 @@ function render() {
   const sideNote = $(".side-note");
   if (sideNote) {
     const b = backupStatus();
-    sideNote.innerHTML = `資料儲存在目前瀏覽器。<br><span style="${b.late ? "color:#ffb4a6;font-weight:700" : ""}">上次備份：${b.text}</span>`;
+    sideNote.innerHTML = `資料儲存在目前瀏覽器。<br><span style="${b.late ? "color:#ffb4a6;font-weight:700" : ""}">上次備份：${b.text}</span>${gLinked ? "<br>Google Drive：" + gStatus : ""}`;
   }
   document.querySelectorAll(".nav").forEach(button => {
     button.classList.toggle("active", button.dataset.view === view);
@@ -188,7 +363,7 @@ function render() {
     const overdue = allDeadlines.filter(item => item.date < today()).length;
 
     content.innerHTML = `
-      ${alertBanner()}
+      ${gBanner()}${alertBanner()}
       <div class="grid">
         <div class="stat"><span>管理中團體</span><strong>${activeGroups.length}</strong></div>
         <div class="stat"><span>即將到期項目（7天內）</span><strong>${dueSoon}</strong></div>
@@ -239,7 +414,7 @@ function render() {
   }
 
   if (view === "backup") {
-    content.innerHTML = `<div class="panel"><h2>資料備份</h2>
+    content.innerHTML = `${gPanel()}<div class="panel"><h2>資料備份</h2>
       <p>資料只存在目前使用的瀏覽器。請定期匯出 JSON，並妥善保存備份檔。</p>
       <p><b>上次備份：${backupStatus().text}</b></p>
       <div class="row"><button class="btn" id="export">匯出完整備份</button><label class="btn light">匯入備份<input id="import" type="file" accept=".json,application/json" hidden></label></div>
@@ -517,6 +692,7 @@ $("#nav")?.addEventListener("click", event => {
 });
 $("#quickAdd")?.addEventListener("click", () => groupForm());
 document.addEventListener("keydown", event => { if (event.key === "Escape") closeModal(); });
+gInit();
 
 $("#content")?.addEventListener("click", async event => {
 
@@ -555,6 +731,8 @@ $("#content")?.addEventListener("click", async event => {
   if (target.id === "editRates") rateForm();
   if (target.id === "refreshRates") refreshRates();
   if (target.id === "export") exportBackup();
+  if (target.id === "gConnect") gConnect();
+  if (target.id === "gUnlink") gUnlink();
   if (target.id === "billAll" && confirm("確定要把目前所有「未打請款單」的刷卡紀錄，全部標為已打嗎？\n（只適合第一次升級後，舊紀錄其實都已經打過單的時候使用）")) {
     db.cards.forEach(c => { if (!c.billed) { c.billed = true; c.billedAt = today(); } });
     save();
